@@ -58,6 +58,7 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 | `converted` | OCR 转换成功 | 跳过 |
 | `failed` | OCR 转换失败 | 重试 OCR |
 | `skipped` | 检测失败 | 重新检测 |
+| `excluded` | 匹配排除规则 | 永久跳过 |
 
 > 关键优化：检测为需要 OCR 时立即保存 `need_ocr` 状态。即使 OCR 阶段中断，下次重启也直接进入 OCR，不会重复检测。
 
@@ -94,6 +95,7 @@ try_ports = 1224, 1225, 1226, 1227, 1228, 1229, 1230, 1241
 [http]
 request_timeout = 30
 poll_timeout = 60
+download_timeout = 300
 poll_interval = 2
 max_poll_time = 600
 
@@ -106,6 +108,10 @@ backup_original = true
 verify_on_success = true
 cleanup_backup_on_success = true
 text_layer_ratio = 0.5
+
+[filter]
+# 文件名排除规则（通配符 * ?，逗号分隔，不区分大小写）
+exclude_patterns = *银行流水*,*流水*
 
 [ocr]
 # Umi-OCR 识别参数
@@ -133,6 +139,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_CLEANUP_BACKUP` | `1` | 验证通过后是否清理备份 | `[behavior] cleanup_backup_on_success` |
 | `PDF_OCR_TIMEOUT` | `30` | HTTP 请求超时（秒） | `[http] request_timeout` |
 | `PDF_OCR_POLL_TIMEOUT` | `60` | 轮询专用超时（秒） | `[http] poll_timeout` |
+| `PDF_OCR_DOWNLOAD_TIMEOUT` | `300` | 下载专用超时（秒，大文件下载） | `[http] download_timeout` |
 | `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） | `[http] poll_interval` |
 | `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） | `[http] max_poll_time` |
 | `PDF_OCR_PORTS` | `1224,...` | 端口列表（逗号分隔） | `[server] try_ports` |
@@ -141,6 +148,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_CLS` | `false` | 纠正文本方向 | `[ocr] cls` |
 | `PDF_OCR_LIMIT_SIDE_LEN` | `960` | 限制图像边长 | `[ocr] limit_side_len` |
 | `PDF_OCR_PARSER` | `multi_para` | 排版解析方案 | `[ocr] parser` |
+| `PDF_OCR_EXCLUDE` | (空) | 文件名排除模式（逗号分隔） | `[filter] exclude_patterns` |
 
 ### OCR 识别参数详解
 
@@ -234,3 +242,5 @@ pdf-ocr-dual-layer/
 | 1.4.0 | 2026-07-25 | 新增 `[ocr]` 段，Umi-OCR 识别参数（提取模式/语言/方向纠正/边长/排版）可配置 |
 | 1.5.0 | 2026-07-25 | 状态机驱动流程，新增 `need_ocr` 中间态，中断不重复检测，`failed` 自动重试 |
 | 1.5.1 | 2026-07-25 | 修复 Windows 跨卷下载 Bug；备份前清理历史备份，避免重试堆积 |
+| 1.5.2 | 2026-07-25 | 新增 `DOWNLOAD_TIMEOUT` 配置项，修复多页 PDF 下载超时失败 |
+| 1.6.0 | 2026-07-25 | 新增文件名排除规则（`[filter] exclude_patterns`），跳过银行流水等大型扫描件 |

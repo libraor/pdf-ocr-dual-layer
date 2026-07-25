@@ -151,6 +151,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_CLEANUP_BACKUP` | `1` | 验证通过后是否清理备份（`0` 保留用于回滚） | `[behavior] cleanup_backup_on_success` |
 | `PDF_OCR_TIMEOUT` | `30` | HTTP 请求超时（秒，上传/下载/普通请求） | `[http] request_timeout` |
 | `PDF_OCR_POLL_TIMEOUT` | `60` | 轮询专用超时（秒，OCR 处理大文件响应慢） | `[http] poll_timeout` |
+| `PDF_OCR_DOWNLOAD_TIMEOUT` | `300` | 下载专用超时（秒，多页 PDF 下载） | `[http] download_timeout` |
 | `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） | `[http] poll_interval` |
 | `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） | `[http] max_poll_time` |
 | `PDF_OCR_PORTS` | `1224,...` | 端口列表（逗号分隔） | `[server] try_ports` |
@@ -159,6 +160,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_CLS` | `false` | 纠正文本方向 | `[ocr] cls` |
 | `PDF_OCR_LIMIT_SIDE_LEN` | `960` | 限制图像边长（960/2880/4320/999999） | `[ocr] limit_side_len` |
 | `PDF_OCR_PARSER` | `multi_para` | 排版解析方案 | `[ocr] parser` |
+| `PDF_OCR_EXCLUDE` | (空) | 文件名排除模式（逗号分隔） | `[filter] exclude_patterns` |
 
 > `textOnly` 提取模式由脚本内部用于文本层检测，不可在 `[ocr]` 段配置。
 > 完整参数说明参见 [Umi-OCR HTTP API 文档](https://github.com/hiroi-sora/Umi-OCR/blob/main/docs/http/api_doc.md)。

@@ -18,6 +18,7 @@ Umi-OCR 批量转换非双层 PDF 为双层 PDF
 """
 
 import configparser
+import fnmatch
 import hashlib
 import json
 import logging
@@ -41,7 +42,7 @@ except ImportError:
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 
 # ============ 配置文件加载 ============
@@ -119,6 +120,10 @@ class Config:
     # 轮询专用超时（秒）- OCR 处理大文件时响应慢，需要更长
     POLL_TIMEOUT = _cfg_int("http", "poll_timeout", "PDF_OCR_POLL_TIMEOUT", 60)
 
+    # 下载专用超时（秒）- Umi-OCR 生成下载文件可能耗时，特别是多页 PDF
+    # 用于：POST 获取下载链接 + GET 下载文件
+    DOWNLOAD_TIMEOUT = _cfg_int("http", "download_timeout", "PDF_OCR_DOWNLOAD_TIMEOUT", 300)
+
     # 轮询间隔（秒）
     POLL_INTERVAL = _cfg_int("http", "poll_interval", "PDF_OCR_POLL_INTERVAL", 2)
 
@@ -161,6 +166,15 @@ class Config:
 
     # 排版解析方案（详见 config.ini 注释）
     OCR_PARSER = _cfg_str("ocr", "parser", "PDF_OCR_PARSER", "multi_para")
+
+    # ============ 文件过滤 ============
+    # 文件名排除模式（不区分大小写，支持通配符 * ?，逗号分隔）
+    # 匹配文件名的 PDF 会被标记为 excluded，永久跳过不 OCR
+    # 示例：*银行流水*,*流水*
+    EXCLUDE_PATTERNS = [
+        p.strip() for p in _cfg_str("filter", "exclude_patterns", "PDF_OCR_EXCLUDE", "").split(",")
+        if p.strip()
+    ]
 
     # 本地工作目录环境变量名
     WORK_DIR_ENV = "PDF_OCR_WORK_DIR"
@@ -270,6 +284,20 @@ def find_pdfs(root_dir: str) -> list[Path]:
     return sorted(set(pdfs))
 
 
+def is_excluded(pdf_path: Path) -> tuple[bool, str]:
+    """
+    检查文件是否匹配排除规则
+    返回 (是否排除, 匹配的模式)
+    """
+    if not Config.EXCLUDE_PATTERNS:
+        return False, ""
+    name_lower = pdf_path.name.lower()
+    for pattern in Config.EXCLUDE_PATTERNS:
+        if fnmatch.fnmatch(name_lower, pattern.lower()):
+            return True, pattern
+    return False, ""
+
+
 # ============ Umi-OCR 任务操作 ============
 def upload_pdf(pdf_path: Path, options: dict) -> Optional[str]:
     """上传 PDF 到 Umi-OCR，返回任务 ID"""
@@ -352,12 +380,14 @@ def download_result(task_id: str, file_types: list[str], output_path: Path) -> b
     try:
         for attempt in range(Config.DOWNLOAD_RETRIES):
             try:
-                resp = requests.post(url, json=payload, timeout=Config.REQUEST_TIMEOUT)
+                # POST 获取下载链接（Umi-OCR 生成文件可能耗时，用 DOWNLOAD_TIMEOUT）
+                resp = requests.post(url, json=payload, timeout=Config.DOWNLOAD_TIMEOUT)
                 result = resp.json()
 
                 if result.get("code") == 100:
                     download_url = result["data"]
-                    dl_resp = requests.get(download_url, timeout=Config.REQUEST_TIMEOUT * 10)
+                    # GET 下载文件（同样用 DOWNLOAD_TIMEOUT）
+                    dl_resp = requests.get(download_url, timeout=Config.DOWNLOAD_TIMEOUT)
                     dl_resp.raise_for_status()
                     tmp_path.write_bytes(dl_resp.content)
                     # 同卷原子替换（Windows 下跨卷会失败）
@@ -661,7 +691,7 @@ def load_progress(progress_path: Path) -> dict:
             log().warning(f"加载进度失败，重新开始: {e}")
     return {
         "records": [],
-        "stats": {"converted": 0, "already_dual": 0, "failed": 0, "skipped": 0},
+        "stats": {"converted": 0, "already_dual": 0, "failed": 0, "skipped": 0, "excluded": 0},
         "target_dir": "",
         "version": __version__,
     }
@@ -686,6 +716,7 @@ def save_progress(progress_path: Path, progress: dict) -> None:
 #   converted    - OCR 转换成功
 #   failed       - OCR 转换失败
 #   skipped      - 检测失败跳过
+#   excluded     - 匹配排除规则，永久跳过
 
 def _make_progress(records: list, stats: dict, target_dir: str) -> dict:
     """构建进度字典"""
@@ -717,6 +748,7 @@ def _recompute_stats(stats: dict, records: list) -> None:
     stats["already_dual"] = sum(1 for r in records if r["status"] == "already_dual")
     stats["failed"] = sum(1 for r in records if r["status"] == "failed")
     stats["skipped"] = sum(1 for r in records if r["status"] == "skipped")
+    stats["excluded"] = sum(1 for r in records if r["status"] == "excluded")
 
 
 def _do_ocr_stage(pdf_path: Path, rel_path: str, target_dir: str,
@@ -747,6 +779,7 @@ def _print_status_summary(records: list) -> None:
     print(f"    ✅ 已转换:   {counts.get('converted', 0)}")
     print(f"    ❌ 失败:     {counts.get('failed', 0)}")
     print(f"    ⏭ 跳过:     {counts.get('skipped', 0)}")
+    print(f"    🚫 排除:     {counts.get('excluded', 0)}")
 
 
 # ============ 报告生成 ============
@@ -771,6 +804,7 @@ def write_report(report_path: Path, stats: dict, records: list,
     lines.append(f"| ✅ 成功转换 | {stats['converted']} |")
     lines.append(f"| ❌ 转换失败 | {stats['failed']} |")
     lines.append(f"| ⏭ 跳过 | {stats['skipped']} |")
+    lines.append(f"| 🚫 排除规则 | {stats.get('excluded', 0)} |")
 
     processed = stats["converted"] + stats["failed"]
     if processed > 0:
@@ -788,6 +822,7 @@ def write_report(report_path: Path, stats: dict, records: list,
         "converted": "✅ 已转换",
         "failed": "❌ 失败",
         "skipped": "⏭ 跳过",
+        "excluded": "🚫 排除",
     }
 
     for r in records:
@@ -865,6 +900,22 @@ def main() -> None:
                 if status == "converted":
                     print(f"[{i}/{len(pdfs)}] {rel_path}  ⏭ 已转换，跳过")
                     continue
+                if status == "excluded":
+                    # 排除规则匹配的文件，永久跳过
+                    continue
+
+            # ===== 排除规则检查（优先于 need_ocr/failed/skipped/无记录） =====
+            # 已是双层/已转换的文件保留原状态，不排除
+            excluded, pattern = is_excluded(pdf_path)
+            if excluded:
+                print(f"[{i}/{len(pdfs)}] {rel_path}  ⏭ 匹配排除规则 '{pattern}'，跳过")
+                _upsert_record(records, record_map, rel_path, "excluded", f"匹配排除规则: {pattern}")
+                _recompute_stats(stats, records)
+                save_progress(progress_path, _make_progress(records, stats, target_dir))
+                continue
+
+            if record is not None:
+                status = record["status"]
                 if status == "need_ocr":
                     # 已检测需 OCR，直接进入 OCR 阶段（跳过检测）
                     print(f"[{i}/{len(pdfs)}] {rel_path}  🔄 待 OCR（已检测，跳过文本层检测）")
