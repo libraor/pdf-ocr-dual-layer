@@ -17,6 +17,7 @@ Umi-OCR 批量转换非双层 PDF 为双层 PDF
   PyMuPDF 本地检测 -> 无文本   -> 备份原文件 -> Umi-OCR HTTP 转换 -> 覆盖原文件
 """
 
+import configparser
 import hashlib
 import json
 import logging
@@ -40,47 +41,144 @@ except ImportError:
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.1.0"
+__version__ = "1.4.0"
+
+
+# ============ 配置文件加载 ============
+def _load_config_file() -> configparser.ConfigParser:
+    """
+    加载配置文件，按优先级查找首个存在的文件：
+      1. 环境变量 PDF_OCR_CONFIG_FILE 指定的路径
+      2. 脚本所在目录的 config.ini
+    未找到则返回空 parser（使用代码默认值）
+    """
+    parser = configparser.ConfigParser()
+    candidates: list[Path] = []
+
+    env_path = os.environ.get("PDF_OCR_CONFIG_FILE")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path(__file__).parent / "config.ini")
+
+    for path in candidates:
+        if path.is_file():
+            try:
+                parser.read(path, encoding="utf-8")
+                print(f"已加载配置文件: {path}")
+                break
+            except Exception as e:
+                print(f"⚠ 加载配置文件 {path} 失败: {e}，使用默认值")
+                parser = configparser.ConfigParser()
+    return parser
+
+
+_CONFIG_FILE = _load_config_file()
+
+
+def _cfg_str(section: str, key: str, env_name: str, default: str) -> str:
+    """读取字符串配置：环境变量 > 配置文件 > 默认值"""
+    env_val = os.environ.get(env_name)
+    if env_val is not None and env_val != "":
+        return env_val
+    if _CONFIG_FILE.has_option(section, key):
+        val = _CONFIG_FILE.get(section, key).strip()
+        if val != "":
+            return val
+    return default
+
+
+def _cfg_bool(section: str, key: str, env_name: str, default: bool) -> bool:
+    """读取布尔配置"""
+    s = _cfg_str(section, key, env_name, "true" if default else "false")
+    return s.lower() in ("1", "true", "yes", "on")
+
+
+def _cfg_int(section: str, key: str, env_name: str, default: int) -> int:
+    """读取整数配置"""
+    return int(_cfg_str(section, key, env_name, str(default)))
+
+
+def _cfg_float(section: str, key: str, env_name: str, default: float) -> float:
+    """读取浮点配置"""
+    return float(_cfg_str(section, key, env_name, str(default)))
 
 
 # ============ 配置 ============
 class Config:
-    """集中配置项，支持环境变量覆盖"""
+    """集中配置项。优先级：环境变量 > config.ini > 默认值"""
+
     # Umi-OCR 端口探测列表（端口可能因占用而漂移）
-    TRY_PORTS = [1224, 1225, 1226, 1227, 1228, 1229, 1230, 1241]
+    TRY_PORTS = [int(p.strip()) for p in _cfg_str(
+        "server", "try_ports", "PDF_OCR_PORTS",
+        "1224,1225,1226,1227,1228,1229,1230,1241"
+    ).split(",") if p.strip()]
 
-    # HTTP 请求超时（秒）— 上传/下载/普通请求
-    REQUEST_TIMEOUT = int(os.environ.get("PDF_OCR_TIMEOUT", "30"))
+    # HTTP 请求超时（秒）- 上传/下载/普通请求
+    REQUEST_TIMEOUT = _cfg_int("http", "request_timeout", "PDF_OCR_TIMEOUT", 30)
 
-    # 轮询专用超时（秒）— OCR 处理大文件时响应慢，需要更长
-    POLL_TIMEOUT = int(os.environ.get("PDF_OCR_POLL_TIMEOUT", "60"))
+    # 轮询专用超时（秒）- OCR 处理大文件时响应慢，需要更长
+    POLL_TIMEOUT = _cfg_int("http", "poll_timeout", "PDF_OCR_POLL_TIMEOUT", 60)
 
     # 轮询间隔（秒）
-    POLL_INTERVAL = int(os.environ.get("PDF_OCR_POLL_INTERVAL", "2"))
+    POLL_INTERVAL = _cfg_int("http", "poll_interval", "PDF_OCR_POLL_INTERVAL", 2)
 
     # 单个 PDF 最大处理时间（秒）
-    MAX_POLL_TIME = int(os.environ.get("PDF_OCR_MAX_TIME", "600"))
+    MAX_POLL_TIME = _cfg_int("http", "max_poll_time", "PDF_OCR_MAX_TIME", 600)
 
     # 轮询进度提示间隔（秒）
-    PROGRESS_NOTIFY_INTERVAL = 60
+    PROGRESS_NOTIFY_INTERVAL = _cfg_int("http", "progress_notify_interval", "", 60)
 
     # 下载重试次数
-    DOWNLOAD_RETRIES = 5
+    DOWNLOAD_RETRIES = _cfg_int("http", "download_retries", "", 5)
 
     # 文本层检测：有文本页数 / 抽样页数 ≥ 此阈值才判定为双层
-    TEXT_LAYER_RATIO = 0.5
+    TEXT_LAYER_RATIO = _cfg_float("behavior", "text_layer_ratio", "", 0.5)
 
     # 是否备份原文件（覆盖前备份到本地专用目录）
-    BACKUP_ORIGINAL = os.environ.get("PDF_OCR_BACKUP", "1") == "1"
+    BACKUP_ORIGINAL = _cfg_bool("behavior", "backup_original", "PDF_OCR_BACKUP", True)
 
     # 转换后是否验证新 PDF 有效性（页数、文本层等）
-    VERIFY_ON_SUCCESS = os.environ.get("PDF_OCR_VERIFY", "1") == "1"
+    VERIFY_ON_SUCCESS = _cfg_bool("behavior", "verify_on_success", "PDF_OCR_VERIFY", True)
 
     # 验证通过后是否清理备份（节省硬盘空间；关闭则保留备份用于回滚）
-    CLEANUP_BACKUP_ON_SUCCESS = os.environ.get("PDF_OCR_CLEANUP_BACKUP", "1") == "1"
+    CLEANUP_BACKUP_ON_SUCCESS = _cfg_bool(
+        "behavior", "cleanup_backup_on_success", "PDF_OCR_CLEANUP_BACKUP", True
+    )
+
+    # ============ OCR 识别参数（传递给 Umi-OCR API） ============
+    # 内容提取模式：mixed(混合,默认) / fullPage(整页强制OCR) / ocrOnly(仅OCR图片)
+    # 注意：textOnly 仅用于内部文本层检测，不可作为转换模式
+    OCR_EXTRACTION_MODE = _cfg_str("ocr", "extraction_mode", "PDF_OCR_EXTRACTION_MODE", "mixed")
+
+    # 语言/模型库（详见 config.ini 注释）
+    OCR_LANGUAGE = _cfg_str("ocr", "language", "PDF_OCR_LANGUAGE", "models/config_chinese.txt")
+
+    # 纠正文本方向（识别倾斜或倒置的文本，可能降低识别速度）
+    OCR_CLS = _cfg_bool("ocr", "cls", "PDF_OCR_CLS", False)
+
+    # 限制图像边长（边长大于此值的图片会被压缩；越大越精确但越慢）
+    OCR_LIMIT_SIDE_LEN = _cfg_int("ocr", "limit_side_len", "PDF_OCR_LIMIT_SIDE_LEN", 960)
+
+    # 排版解析方案（详见 config.ini 注释）
+    OCR_PARSER = _cfg_str("ocr", "parser", "PDF_OCR_PARSER", "multi_para")
 
     # 本地工作目录环境变量名
     WORK_DIR_ENV = "PDF_OCR_WORK_DIR"
+
+
+def build_ocr_options(extraction_mode: Optional[str] = None) -> dict:
+    """构建 Umi-OCR API 选项字典
+
+    Args:
+        extraction_mode: 提取模式覆盖；None 则使用 Config.OCR_EXTRACTION_MODE
+    """
+    return {
+        "doc.extractionMode": extraction_mode or Config.OCR_EXTRACTION_MODE,
+        "ocr.language": Config.OCR_LANGUAGE,
+        "ocr.cls": Config.OCR_CLS,
+        "ocr.limit_side_len": Config.OCR_LIMIT_SIDE_LEN,
+        "tbpu.parser": Config.OCR_PARSER,
+    }
 
 
 # ============ 本地工作目录管理 ============
@@ -93,9 +191,10 @@ def get_work_dir() -> Path:
     if _WORK_DIR:
         return _WORK_DIR
 
-    env_val = os.environ.get(Config.WORK_DIR_ENV)
-    if env_val:
-        work_dir = Path(env_val)
+    # 优先级：环境变量 PDF_OCR_WORK_DIR > config.ini [storage] work_dir > 系统默认
+    work_dir_str = _cfg_str("storage", "work_dir", Config.WORK_DIR_ENV, "")
+    if work_dir_str:
+        work_dir = Path(work_dir_str)
     elif sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA", str(Path.home()))
         work_dir = Path(base) / "pdf-ocr-dual-layer"
@@ -496,7 +595,7 @@ def ocr_to_dual_layer(pdf_path: Path, target_dir: str) -> bool:
         return False
 
     # 3. OCR 上传
-    task_id = upload_pdf(pdf_path, {"doc.extractionMode": "mixed"})
+    task_id = upload_pdf(pdf_path, build_ocr_options())
     if not task_id:
         return False
 

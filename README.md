@@ -64,18 +64,83 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 
 ## 配置
 
-所有配置通过环境变量覆盖，均有默认值。
+支持三种配置方式，**优先级：环境变量 > `config.ini` > 代码默认值**。
 
-| 变量 | 默认值 | 说明 |
+### 方式一：配置文件（推荐）
+
+编辑脚本同目录的 [config.ini](./config.ini)，所有项均带注释说明：
+
+```ini
+[server]
+try_ports = 1224, 1225, 1226, 1227, 1228, 1229, 1230, 1241
+
+[http]
+request_timeout = 30
+poll_timeout = 60
+poll_interval = 2
+max_poll_time = 600
+
+[storage]
+# 留空使用系统默认
+work_dir =
+
+[behavior]
+backup_original = true
+verify_on_success = true
+cleanup_backup_on_success = true
+text_layer_ratio = 0.5
+
+[ocr]
+# Umi-OCR 识别参数
+extraction_mode = mixed                          # mixed/fullPage/ocrOnly
+language = models/config_chinese.txt             # 简体中文/English/繁體/日本語/한국어/Русский
+cls = false                                      # 纠正文本方向
+limit_side_len = 960                             # 960/2880/4320/999999
+parser = multi_para                              # 排版解析方案
+```
+
+配置文件查找位置（按顺序，首个存在的生效）：
+1. 环境变量 `PDF_OCR_CONFIG_FILE` 指定的路径
+2. 脚本所在目录的 `config.ini`
+
+> 想为不同设备维护独立配置：把 `config.ini` 加入 `.gitignore`/坚果云排除，用 `PDF_OCR_CONFIG_FILE` 指向各设备本地路径。
+
+### 方式二：环境变量（覆盖配置文件）
+
+| 变量 | 默认值 | 说明 | 对应配置项 |
+|------|--------|------|-----------|
+| `PDF_OCR_CONFIG_FILE` | - | 指定配置文件路径 | - |
+| `PDF_OCR_WORK_DIR` | 系统默认 | 本地工作目录 | `[storage] work_dir` |
+| `PDF_OCR_BACKUP` | `1` | 是否备份原文件（`0` 关闭，**风险自负**） | `[behavior] backup_original` |
+| `PDF_OCR_VERIFY` | `1` | 转换后是否验证新 PDF | `[behavior] verify_on_success` |
+| `PDF_OCR_CLEANUP_BACKUP` | `1` | 验证通过后是否清理备份 | `[behavior] cleanup_backup_on_success` |
+| `PDF_OCR_TIMEOUT` | `30` | HTTP 请求超时（秒） | `[http] request_timeout` |
+| `PDF_OCR_POLL_TIMEOUT` | `60` | 轮询专用超时（秒） | `[http] poll_timeout` |
+| `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） | `[http] poll_interval` |
+| `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） | `[http] max_poll_time` |
+| `PDF_OCR_PORTS` | `1224,...` | 端口列表（逗号分隔） | `[server] try_ports` |
+| `PDF_OCR_EXTRACTION_MODE` | `mixed` | 提取模式（`mixed`/`fullPage`/`ocrOnly`） | `[ocr] extraction_mode` |
+| `PDF_OCR_LANGUAGE` | `models/config_chinese.txt` | 语言/模型库 | `[ocr] language` |
+| `PDF_OCR_CLS` | `false` | 纠正文本方向 | `[ocr] cls` |
+| `PDF_OCR_LIMIT_SIDE_LEN` | `960` | 限制图像边长 | `[ocr] limit_side_len` |
+| `PDF_OCR_PARSER` | `multi_para` | 排版解析方案 | `[ocr] parser` |
+
+### OCR 识别参数详解
+
+| 参数 | 可选值 | 说明 |
 |------|--------|------|
-| `PDF_OCR_WORK_DIR` | 系统默认 | 本地工作目录（缓存/日志/进度/备份） |
-| `PDF_OCR_BACKUP` | `1` | 是否备份原文件（`0` 关闭，**风险自负**） |
-| `PDF_OCR_VERIFY` | `1` | 转换后是否验证新 PDF（页数/文本层） |
-| `PDF_OCR_CLEANUP_BACKUP` | `1` | 验证通过后是否清理备份（`0` 保留用于回滚） |
-| `PDF_OCR_TIMEOUT` | `30` | HTTP 请求超时（秒，上传/下载/普通请求） |
-| `PDF_OCR_POLL_TIMEOUT` | `60` | 轮询专用超时（秒，OCR 处理大文件响应慢） |
-| `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） |
-| `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） |
+| `extraction_mode` | `mixed` / `fullPage` / `ocrOnly` | mixed=混合(图文混排推荐)；fullPage=整页强制OCR(扫描件)；ocrOnly=仅OCR图片 |
+| `language` | `models/config_chinese.txt` 等 | 语言模型库，详见 config.ini 注释 |
+| `cls` | `true` / `false` | 启用方向分类，识别倾斜或倒置的文本，可能降低速度 |
+| `limit_side_len` | `960` / `2880` / `4320` / `999999` | 边长大于此值的图片会被压缩；越大越精确越慢 |
+| `parser` | `multi_para` 等 | 排版解析方案：multi_para=多栏自然段；single_code=保留缩进(代码) |
+
+> `textOnly` 提取模式由脚本内部用于文本层检测，不可在 `[ocr]` 段配置。
+> 完整参数说明参见 [Umi-OCR HTTP API 文档](https://github.com/hiroi-sora/Umi-OCR/blob/main/docs/http/api_doc.md)。
+
+### 方式三：默认值
+
+不配置任何项即使用代码内置默认值，开箱即用。
 
 ### 配置组合
 
@@ -89,12 +154,15 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 ### 设置示例（PowerShell）
 
 ```powershell
-setx PDF_OCR_CLEANUP_BACKUP "0"     # 保留所有备份
-setx PDF_OCR_MAX_TIME "1800"        # 大 PDF 超时延至 30 分钟
-setx PDF_OCR_WORK_DIR "D:\pdf-ocr"  # 自定义工作目录
-```
+# 临时覆盖（当前会话）
+$env:PDF_OCR_TIMEOUT = "99"
 
-设置后需重启终端生效。
+# 永久设置（重启终端生效）
+setx PDF_OCR_CLEANUP_BACKUP "0"
+setx PDF_OCR_MAX_TIME "1800"
+setx PDF_OCR_WORK_DIR "D:\pdf-ocr"
+setx PDF_OCR_CONFIG_FILE "D:\my-pdf-ocr-config.ini"
+```
 
 ## 文件命名规范
 
@@ -130,6 +198,7 @@ pdf-ocr-dual-layer/
 ├── README.md                       # 本文件
 ├── SKILL.md                        # AI Skill 描述文件
 ├── convert_pdfs_to_dual_layer.py   # 主程序
+├── config.ini                      # 配置文件模板
 ├── requirements.txt                # Python 依赖
 └── STORAGE_DESIGN.md               # 文件存储设计方案
 ```
@@ -144,3 +213,5 @@ pdf-ocr-dual-layer/
 |------|------|------|
 | 1.1.0 | 2026-07-25 | 本地专用目录架构、备份机制、进度隔离 |
 | 1.2.0 | 2026-07-25 | 转换后验证、失败自动回滚、验证通过自动清理备份 |
+| 1.3.0 | 2026-07-25 | 新增 `config.ini` 配置文件支持，三级优先级：环境变量 > 配置文件 > 默认值 |
+| 1.4.0 | 2026-07-25 | 新增 `[ocr]` 段，Umi-OCR 识别参数（提取模式/语言/方向纠正/边长/排版）可配置 |
