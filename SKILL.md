@@ -4,6 +4,7 @@ description: >
   使用 Umi-OCR 将非双层（不可搜索）PDF 批量转换为双层（可搜索）PDF。
   支持断点续跑、本地文本层检测、自动端口探测、Markdown 报告输出。
   Umi-OCR 必须运行中且 HTTP 服务已开启。
+  临时文件、进度、备份均存放于本地专用目录，不污染同步目录。
 ---
 
 # PDF 双层转换
@@ -11,7 +12,27 @@ description: >
 ## 前置条件
 
 1. **Umi-OCR** 已启动，HTTP 服务已开启（默认端口 1224，脚本自动探测）
-2. Python 环境已安装 `requests` 和 `fitz`（PyMuPDF）
+   - 下载：<https://github.com/hiroi-sora/Umi-OCR/releases>
+2. Python 3.9+ 已安装依赖：
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## 文件存储架构
+
+| 类型 | 位置 | 是否同步 | 说明 |
+|------|------|---------|------|
+| 主程序（脚本/SKILL.md） | 脚本目录（坚果云） | ✅ 同步 | 多设备共享代码 |
+| 临时缓存 | `%LOCALAPPDATA%\pdf-ocr-dual-layer\cache\` | ❌ 本地 | OCR 中间产物 |
+| 运行日志 | `%LOCALAPPDATA%\pdf-ocr-dual-layer\logs\` | ❌ 本地 | 详细运行日志 |
+| 进度文件 | `%LOCALAPPDATA%\pdf-ocr-dual-layer\progress\` | ❌ 本地 | 断点续传 |
+| 原 PDF 备份 | `%LOCALAPPDATA%\pdf-ocr-dual-layer\backup\` | ❌ 本地 | 覆盖前自动备份，验证通过后自动清理 |
+| 转换报告 | 目标目录 | 视目标目录而定 | 产出物，便于查看 |
+
+> Linux/Mac 等价路径：`~/.local/share/pdf-ocr-dual-layer/`
+> 可通过环境变量 `PDF_OCR_WORK_DIR` 覆盖本地工作目录。
+
+详细设计方案见 [STORAGE_DESIGN.md](./STORAGE_DESIGN.md)。
 
 ## 使用方式
 
@@ -21,12 +42,10 @@ description: >
 对 <目标目录> 执行 PDF 双层转换
 ```
 
-脚本位置：与本 SKILL.md 同目录的 `convert_pdfs_to_dual_layer.py`
-
 ### 手动执行
 
 ```bash
-python "C:\Users\linya\.claude\skills\pdf-ocr-dual-layer\convert_pdfs_to_dual_layer.py" "目标目录路径"
+python "<脚本所在目录>/convert_pdfs_to_dual_layer.py" "目标目录路径"
 ```
 
 不传参数则处理脚本所在目录。
@@ -36,11 +55,15 @@ python "C:\Users\linya\.claude\skills\pdf-ocr-dual-layer\convert_pdfs_to_dual_la
 ```
 扫描目录所有 PDF
   ↓
-PyMuPDF 本地检测文本层（<0.1秒/文件）
-  ├─ 有文本层 → 跳过（已是双层/可搜索 PDF）
-  └─ 无文本层 → Umi-OCR HTTP 转换 → 覆盖原文件
+PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
+  ├─ 有文本层 -> 跳过（已是双层/可搜索 PDF）
+  └─ 无文本层 -> 备份原文件 -> Umi-OCR HTTP 转换 -> 覆盖原文件
+       ↓
+       验证新文件（页数/文本层）
+       ├─ 验证通过 -> 清理备份（节省空间）
+       └─ 验证失败 -> 从备份恢复原文件
   ↓
-生成 pdf_conversion_report.md 报告
+生成 pdf_conversion_report.md 报告（写入目标目录）
 ```
 
 ## 关键特性
@@ -51,12 +74,42 @@ PyMuPDF 本地检测文本层（<0.1秒/文件）
 | **本地检测** | PyMuPDF 抽样检测文本层，秒级判断，不消耗 HTTP 资源 |
 | **端口自动探测** | 尝试 [1224-1230, 1241] 等端口，适配端口漂移 |
 | **原子写入** | 先写临时文件再替换，中断不会损坏原文件 |
+| **转换验证** | 验证新 PDF 页数与文本层，异常自动回滚 |
+| **原文件备份** | 覆盖前自动备份到本地专用目录，验证通过后自动清理 |
+| **进度隔离** | 不同目标目录的进度按 hash 隔离，互不干扰 |
 | **Markdown 报告** | 输出汇总统计 + 每文件详细状态 |
+| **本地化存储** | 临时/进度/备份均存放本地，不污染同步目录 |
+| **日志记录** | 详细日志写入本地，便于排错 |
+| **进度提示** | 长时间 OCR 每 60 秒输出已等待时间 |
 
-## 进度文件
+## 配置（环境变量）
 
-- `pdf_conversion_progress.json` — 断点续跑记录，删除后重新开始
-- `pdf_conversion_report.md` — 最终/阶段性报告
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `PDF_OCR_WORK_DIR` | 系统默认 | 本地工作目录（缓存/日志/进度/备份） |
+| `PDF_OCR_BACKUP` | `1` | 是否备份原文件（`0` 关闭，**风险自负**） |
+| `PDF_OCR_VERIFY` | `1` | 转换后是否验证新 PDF（页数/文本层） |
+| `PDF_OCR_CLEANUP_BACKUP` | `1` | 验证通过后是否清理备份（`0` 保留用于回滚） |
+| `PDF_OCR_TIMEOUT` | `10` | HTTP 请求超时（秒） |
+| `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） |
+| `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） |
+
+**配置组合**：
+
+| BACKUP | VERIFY | CLEANUP | 行为 |
+|--------|--------|---------|------|
+| 1 | 1 | 1 | 默认：备份->OCR->验证->通过清理/失败回滚 |
+| 1 | 1 | 0 | 备份保留：验证通过也保留备份，可手动回滚 |
+| 1 | 0 | - | 不验证：OCR 完即视为成功，备份保留 |
+| 0 | - | - | 不备份：直接覆盖原文件（不推荐） |
+
+## 进度与备份文件命名规范
+
+- **进度文件**：`<target_hash8>_pdf_conversion_progress.json`
+  - 同一目标目录多次运行会复用同一进度文件
+  - target_hash 为目标目录绝对路径的 MD5 前 8 位
+- **备份文件**：`<原文件名>.bak.pdf`，重名时附加时间戳 `<原文件名>.YYYYMMDD_HHMMSS.bak.pdf`
+- **日志文件**：`convert_<YYYYMMDD_HHMMSS>_<target_hash8>.log`
 
 ## 故障排查
 
@@ -65,3 +118,10 @@ PyMuPDF 本地检测文本层（<0.1秒/文件）
 | Umi-OCR 连接失败 | 确保 Umi-OCR 已打开，设置中开启 HTTP 服务 |
 | 端口不通 | 查看 `UmiOCR-data/.pre_settings` 确认实际端口 |
 | OCR 转换失败 | 少数 PDF 格式损坏，可手动检查或用其他工具处理 |
+| 验证失败已回滚 | 新 PDF 异常（页数/文本层），原文件已自动恢复；可查看日志排查 |
+| 文件被占用 | 关闭占用 PDF 的程序后重试 |
+| 大 PDF 超时 | 设置 `PDF_OCR_MAX_TIME=1800`（30 分钟） |
+| 进度丢失 | 检查 `%LOCALAPPDATA%\pdf-ocr-dual-layer\progress\` 是否可写 |
+| 想重新开始 | 删除对应 `<hash>_pdf_conversion_progress.json` 后重跑 |
+| 想保留所有备份 | 设置 `PDF_OCR_CLEANUP_BACKUP=0` |
+| 误覆盖想恢复 | 备份目录中仅保留验证失败的文件，成功的已清理；如需回滚成功的转换，需关闭 `PDF_OCR_CLEANUP_BACKUP` 后重跑 |
