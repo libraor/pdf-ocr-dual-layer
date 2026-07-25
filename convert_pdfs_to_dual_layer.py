@@ -41,7 +41,7 @@ except ImportError:
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 # ============ 配置文件加载 ============
@@ -670,6 +670,76 @@ def save_progress(progress_path: Path, progress: dict) -> None:
         log().error(f"保存进度失败: {e}")
 
 
+# ============ 状态机辅助函数 ============
+# 文件状态：
+#   already_dual - 已检测为双层，跳过 OCR
+#   need_ocr     - 已检测需要 OCR，未转换或中断
+#   converted    - OCR 转换成功
+#   failed       - OCR 转换失败
+#   skipped      - 检测失败跳过
+
+def _make_progress(records: list, stats: dict, target_dir: str) -> dict:
+    """构建进度字典"""
+    return {
+        "records": records,
+        "stats": stats,
+        "target_dir": target_dir,
+        "version": __version__,
+    }
+
+
+def _upsert_record(records: list, record_map: dict, rel_path: str,
+                   status: str, detail: str) -> dict:
+    """更新或插入记录，返回该记录对象"""
+    if rel_path in record_map:
+        r = record_map[rel_path]
+        r["status"] = status
+        r["detail"] = detail
+        return r
+    r = {"file": rel_path, "status": status, "detail": detail}
+    records.append(r)
+    record_map[rel_path] = r
+    return r
+
+
+def _recompute_stats(stats: dict, records: list) -> None:
+    """从 records 重新计算 stats，避免重试时重复计数"""
+    stats["converted"] = sum(1 for r in records if r["status"] == "converted")
+    stats["already_dual"] = sum(1 for r in records if r["status"] == "already_dual")
+    stats["failed"] = sum(1 for r in records if r["status"] == "failed")
+    stats["skipped"] = sum(1 for r in records if r["status"] == "skipped")
+
+
+def _do_ocr_stage(pdf_path: Path, rel_path: str, target_dir: str,
+                  record: dict, records: list, stats: dict,
+                  progress_path: Path) -> None:
+    """执行 OCR 阶段并更新记录"""
+    print("  🔄 OCR 转换中...", end=" ", flush=True)
+    if ocr_to_dual_layer(pdf_path, target_dir):
+        print("✅ 转换成功")
+        record["status"] = "converted"
+        record["detail"] = "OCR 成功"
+    else:
+        print("❌ 转换失败")
+        record["status"] = "failed"
+        record["detail"] = "OCR 失败"
+    _recompute_stats(stats, records)
+    save_progress(progress_path, _make_progress(records, stats, target_dir))
+
+
+def _print_status_summary(records: list) -> None:
+    """打印历史进度统计"""
+    counts: dict = {}
+    for r in records:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    print("  历史进度:")
+    print(f"    ✅ 已是双层: {counts.get('already_dual', 0)}")
+    print(f"    🔄 待 OCR:   {counts.get('need_ocr', 0)}")
+    print(f"    ✅ 已转换:   {counts.get('converted', 0)}")
+    print(f"    ❌ 失败:     {counts.get('failed', 0)}")
+    print(f"    ⏭ 跳过:     {counts.get('skipped', 0)}")
+
+
 # ============ 报告生成 ============
 def write_report(report_path: Path, stats: dict, records: list,
                  start_time: datetime, end_time: datetime,
@@ -687,7 +757,9 @@ def write_report(report_path: Path, stats: dict, records: list,
     lines.append("|------|------|")
     lines.append(f"| 总计 | {stats.get('total', 0)} |")
     lines.append(f"| ✅ 已是双层（跳过） | {stats['already_dual']} |")
-    lines.append(f"| 🔄 成功转换 | {stats['converted']} |")
+    need_ocr_count = sum(1 for r in records if r["status"] == "need_ocr")
+    lines.append(f"| 🔄 待 OCR（中断未完成） | {need_ocr_count} |")
+    lines.append(f"| ✅ 成功转换 | {stats['converted']} |")
     lines.append(f"| ❌ 转换失败 | {stats['failed']} |")
     lines.append(f"| ⏭ 跳过 | {stats['skipped']} |")
 
@@ -703,7 +775,8 @@ def write_report(report_path: Path, stats: dict, records: list,
 
     status_emoji = {
         "already_dual": "✅ 已是双层",
-        "converted": "🔄 已转换",
+        "need_ocr": "🔄 待 OCR",
+        "converted": "✅ 已转换",
         "failed": "❌ 失败",
         "skipped": "⏭ 跳过",
     }
@@ -755,14 +828,14 @@ def main() -> None:
     # 进度文件（按目标目录 hash 隔离）
     progress_path = get_progress_path(target_dir)
     progress = load_progress(progress_path)
-    processed_files = {r["file"] for r in progress["records"]}
+    records = progress["records"]
     stats = progress["stats"]
     stats["total"] = len(pdfs)
-    records = progress["records"]
+    record_map = {r["file"]: r for r in records}
 
     print(f"找到 {len(pdfs)} 个 PDF 文件")
-    if processed_files:
-        print(f"已处理 {len(processed_files)} 个，跳过续跑")
+    if records:
+        _print_status_summary(records)
     print()
 
     interrupted = False
@@ -772,14 +845,42 @@ def main() -> None:
     try:
         for i, pdf_path in enumerate(pdfs, 1):
             rel_path = str(pdf_path.relative_to(target_dir))
+            record = record_map.get(rel_path)
 
-            if rel_path in processed_files:
-                print(f"[{i}/{len(pdfs)}] {rel_path}  ⏭ 已处理，跳过")
-                continue
+            # ===== 状态机：根据已有记录决定流程 =====
+            if record is not None:
+                status = record["status"]
+                if status == "already_dual":
+                    print(f"[{i}/{len(pdfs)}] {rel_path}  ⏭ 已是双层，跳过")
+                    continue
+                if status == "converted":
+                    print(f"[{i}/{len(pdfs)}] {rel_path}  ⏭ 已转换，跳过")
+                    continue
+                if status == "need_ocr":
+                    # 已检测需 OCR，直接进入 OCR 阶段（跳过检测）
+                    print(f"[{i}/{len(pdfs)}] {rel_path}  🔄 待 OCR（已检测，跳过文本层检测）")
+                    log().info(f"OCR 重启续跑: {rel_path}")
+                    interrupted_file = rel_path
+                    _do_ocr_stage(pdf_path, rel_path, target_dir, record,
+                                  records, stats, progress_path)
+                    interrupted_file = None
+                    continue
+                if status == "failed":
+                    # 上次失败，重试 OCR
+                    print(f"[{i}/{len(pdfs)}] {rel_path}  🔄 重试 OCR（上次失败）")
+                    log().info(f"重试失败文件: {rel_path}")
+                    interrupted_file = rel_path
+                    _do_ocr_stage(pdf_path, rel_path, target_dir, record,
+                                  records, stats, progress_path)
+                    interrupted_file = None
+                    continue
+                # status == "skipped"：上次检测失败，重新走完整流程
+                print(f"[{i}/{len(pdfs)}] {rel_path}  🔍 重新检测（上次跳过）")
+            else:
+                print(f"[{i}/{len(pdfs)}] {rel_path}")
 
-            interrupted_file = rel_path
-            print(f"[{i}/{len(pdfs)}] {rel_path}")
             log().info(f"处理: {rel_path}")
+            interrupted_file = rel_path
 
             # 阶段 1：检测文本层
             print("  🔍 检测文本层...", end=" ", flush=True)
@@ -787,53 +888,47 @@ def main() -> None:
 
             if has_text is None:
                 print("检测失败，跳过")
-                stats["skipped"] += 1
-                records.append({"file": rel_path, "status": "skipped", "detail": "检测失败"})
-                processed_files.add(rel_path)
-                save_progress(progress_path, {
-                    "records": records, "stats": stats,
-                    "target_dir": target_dir, "version": __version__,
-                })
+                _upsert_record(records, record_map, rel_path, "skipped", "检测失败")
+                _recompute_stats(stats, records)
+                save_progress(progress_path, _make_progress(records, stats, target_dir))
+                interrupted_file = None
                 continue
 
             if has_text:
                 print("✅ 已是双层 PDF，跳过")
-                stats["already_dual"] += 1
-                records.append({"file": rel_path, "status": "already_dual", "detail": "已有文本层"})
-                processed_files.add(rel_path)
-                save_progress(progress_path, {
-                    "records": records, "stats": stats,
-                    "target_dir": target_dir, "version": __version__,
-                })
+                _upsert_record(records, record_map, rel_path, "already_dual", "已有文本层")
+                _recompute_stats(stats, records)
+                save_progress(progress_path, _make_progress(records, stats, target_dir))
+                interrupted_file = None
                 continue
 
             print("❌ 无文本层，开始 OCR...")
 
-            # 阶段 2：OCR 转双层 PDF
-            print("  🔄 OCR 转换中...", end=" ", flush=True)
-            if ocr_to_dual_layer(pdf_path, target_dir):
-                print("✅ 转换成功")
-                stats["converted"] += 1
-                records.append({"file": rel_path, "status": "converted", "detail": "OCR 成功"})
-            else:
-                print("❌ 转换失败")
-                stats["failed"] += 1
-                records.append({"file": rel_path, "status": "failed", "detail": "OCR 失败"})
+            # 关键优化：立即保存 need_ocr 状态，OCR 中断后下次跳过检测
+            _upsert_record(records, record_map, rel_path, "need_ocr", "无文本层，待 OCR")
+            _recompute_stats(stats, records)
+            save_progress(progress_path, _make_progress(records, stats, target_dir))
 
-            processed_files.add(rel_path)
+            # 阶段 2：OCR 转双层 PDF
+            _do_ocr_stage(pdf_path, rel_path, target_dir, record_map[rel_path],
+                          records, stats, progress_path)
             interrupted_file = None
-            save_progress(progress_path, {
-                "records": records, "stats": stats,
-                "target_dir": target_dir, "version": __version__,
-            })
 
     except KeyboardInterrupt:
         interrupted = True
         print("\n\n⏸ 用户中断！进度已保存。")
         log().warning("用户中断")
         if interrupted_file:
-            print(f"中断时正在处理: {interrupted_file}（未完成，下次将从该文件继续）")
-            records = [r for r in records if r["file"] != interrupted_file]
+            r = record_map.get(interrupted_file)
+            # need_ocr 状态保留（下次直接 OCR）；其他状态移除（下次重新检测）
+            if r and r["status"] == "need_ocr":
+                print(f"中断时正在 OCR: {interrupted_file}（已保存待 OCR 状态，下次直接重试 OCR）")
+            else:
+                print(f"中断时正在检测: {interrupted_file}（下次将重新检测）")
+                records[:] = [rr for rr in records if rr["file"] != interrupted_file]
+                record_map.pop(interrupted_file, None)
+            _recompute_stats(stats, records)
+            save_progress(progress_path, _make_progress(records, stats, target_dir))
 
     # 生成报告（写入目标目录，便于用户查看；这是产出物，非临时文件）
     end_time = datetime.now()
