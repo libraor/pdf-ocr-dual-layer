@@ -80,8 +80,7 @@ pdf-ocr-dual-layer/backup/
 |------|---------|------|
 | 进度文件 | `<hash8>_pdf_conversion_progress.json` | `a1b2c3d4_pdf_conversion_progress.json` |
 | 日志文件 | `convert_<YYYYMMDD_HHMMSS>_<hash8>.log` | `convert_20260725_143022_a1b2c3d4.log` |
-| 备份文件（首次） | `<原文件名>.bak.pdf` | `report.bak.pdf` |
-| 备份文件（重名） | `<原文件名>.<时间戳>.bak.pdf` | `report.20260725_143022.bak.pdf` |
+| 备份文件 | `<原文件名>.bak.pdf` | `report.bak.pdf` |
 | 临时文件 | `<task_id>.tmp.pdf` | `abc123.tmp.pdf` |
 
 - `hash8` = `md5(目标目录绝对路径)[:8]`，确保不同目录互不干扰

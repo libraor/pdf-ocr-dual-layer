@@ -177,7 +177,7 @@ parser = multi_para                              # 排版解析方案
 - **进度文件**：`<target_hash8>_pdf_conversion_progress.json`
   - 同一目标目录多次运行会复用同一进度文件
   - target_hash 为目标目录绝对路径的 MD5 前 8 位
-- **备份文件**：`<原文件名>.bak.pdf`，重名时附加时间戳 `<原文件名>.YYYYMMDD_HHMMSS.bak.pdf`
+- **备份文件**：`<原文件名>.bak.pdf`（备份前清理同名历史备份，避免重试堆积）
 - **日志文件**：`convert_<YYYYMMDD_HHMMSS>_<target_hash8>.log`
 
 ## 故障排查

@@ -41,7 +41,7 @@ except ImportError:
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 
 # ============ 配置文件加载 ============
@@ -337,13 +337,17 @@ def poll_result(task_id: str, with_data: bool = True) -> Optional[dict]:
 
 
 def download_result(task_id: str, file_types: list[str], output_path: Path) -> bool:
-    """下载识别结果文件，失败时指数退避重试。临时文件用 try/finally 清理。"""
+    """下载识别结果文件，失败时指数退避重试。临时文件用 try/finally 清理。
+
+    临时文件放在目标文件同目录，确保 Windows 上 replace 是同卷原子操作
+    （Windows 不支持跨卷 rename，会抛 WinError 17）。
+    """
     url = f"{UMI_OCR_BASE}/api/doc/download"
     payload = {"id": task_id, "file_types": file_types, "ignore_blank": False}
 
-    cache_dir = get_work_dir() / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_dir / f"{task_id}.tmp.pdf"
+    # 临时文件与目标文件同目录，确保同卷原子替换
+    # 文件名加 . 前缀（隐藏），避免在目标目录可见
+    tmp_path = output_path.parent / f".{output_path.stem}.{task_id}.tmp.pdf"
 
     try:
         for attempt in range(Config.DOWNLOAD_RETRIES):
@@ -356,7 +360,7 @@ def download_result(task_id: str, file_types: list[str], output_path: Path) -> b
                     dl_resp = requests.get(download_url, timeout=Config.REQUEST_TIMEOUT * 10)
                     dl_resp.raise_for_status()
                     tmp_path.write_bytes(dl_resp.content)
-                    # 原子替换
+                    # 同卷原子替换（Windows 下跨卷会失败）
                     tmp_path.replace(output_path)
                     return True
                 else:
@@ -470,12 +474,17 @@ def backup_original(pdf_path: Path, target_dir: str) -> Optional[Path]:
     backup_dir = get_work_dir() / "backup" / target_hash(target_dir)
     backup_dir.mkdir(parents=True, exist_ok=True)
 
-    # 命名规范：<原文件名>.bak.pdf，重名时附加时间戳
-    backup_name = f"{pdf_path.stem}.bak.pdf"
-    backup_path = backup_dir / backup_name
-    if backup_path.exists():
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = backup_dir / f"{pdf_path.stem}.{ts}.bak.pdf"
+    # 清理该文件的历史备份，避免重试时堆积（<stem>.bak.pdf 和 <stem>.<ts>.bak.pdf）
+    stem = pdf_path.stem
+    for old in backup_dir.glob(f"{stem}*.bak.pdf"):
+        try:
+            old.unlink()
+            log().info(f"清理旧备份: {old.name}")
+        except Exception:
+            pass
+
+    # 创建新备份（无需时间戳，因为旧备份已清理）
+    backup_path = backup_dir / f"{stem}.bak.pdf"
 
     try:
         shutil.copy2(pdf_path, backup_path)

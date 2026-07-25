@@ -74,7 +74,7 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 | 原 PDF 备份 | `%LOCALAPPDATA%\pdf-ocr-dual-layer\backup\` | ❌ |
 | 转换报告 | 目标目录 | 视目标目录而定 |
 
-> Linux/Mac：`~/.local/share/pdf-ocr-dual-layer/`
+> Linux/Mac：`~/.local/share/pdf-ocr-dual-layer/` 
 > 可通过环境变量 `PDF_OCR_WORK_DIR` 覆盖。
 
 详细设计方案见 [STORAGE_DESIGN.md](./STORAGE_DESIGN.md)。
@@ -188,10 +188,10 @@ setx PDF_OCR_CONFIG_FILE "D:\my-pdf-ocr-config.ini"
 | 进度文件 | `<hash8>_pdf_conversion_progress.json` | `a1b2c3d4_pdf_conversion_progress.json` |
 | 日志文件 | `convert_<YYYYMMDD_HHMMSS>_<hash8>.log` | `convert_20260725_143022_a1b2c3d4.log` |
 | 备份文件 | `<原文件名>.bak.pdf` | `report.bak.pdf` |
-| 备份文件（重名） | `<原文件名>.<时间戳>.bak.pdf` | `report.20260725_143022.bak.pdf` |
 | 临时文件 | `<task_id>.tmp.pdf` | `abc123.tmp.pdf` |
 
 `hash8` = `md5(目标目录绝对路径)[:8]`，确保不同目录的进度/备份互不干扰。
+备份前会清理同名历史备份，避免重试时堆积。
 
 ## 故障排查
 
@@ -233,3 +233,4 @@ pdf-ocr-dual-layer/
 | 1.3.0 | 2026-07-25 | 新增 `config.ini` 配置文件支持，三级优先级：环境变量 > 配置文件 > 默认值 |
 | 1.4.0 | 2026-07-25 | 新增 `[ocr]` 段，Umi-OCR 识别参数（提取模式/语言/方向纠正/边长/排版）可配置 |
 | 1.5.0 | 2026-07-25 | 状态机驱动流程，新增 `need_ocr` 中间态，中断不重复检测，`failed` 自动重试 |
+| 1.5.1 | 2026-07-25 | 修复 Windows 跨卷下载 Bug；备份前清理历史备份，避免重试堆积 |
