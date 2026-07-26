@@ -25,7 +25,9 @@ import logging
 import os
 import shutil
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -42,7 +44,7 @@ except ImportError:
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 
 # ============ 配置文件加载 ============
@@ -175,6 +177,13 @@ class Config:
         p.strip() for p in _cfg_str("filter", "exclude_patterns", "PDF_OCR_EXCLUDE", "").split(",")
         if p.strip()
     ]
+
+    # ============ 并发控制 ============
+    # OCR 并发任务数：同时处理的文件数
+    # Umi-OCR 内部支持任务队列，并发上传可让 OCR 引擎持续工作
+    # 推荐：2-4（太高会占用大量内存和 CPU）
+    # 1 = 串行（与旧版行为一致）
+    MAX_CONCURRENT_OCR = _cfg_int("behavior", "max_concurrent_ocr", "PDF_OCR_MAX_CONCURRENT", 3)
 
     # 本地工作目录环境变量名
     WORK_DIR_ENV = "PDF_OCR_WORK_DIR"
@@ -718,6 +727,10 @@ def save_progress(progress_path: Path, progress: dict) -> None:
 #   skipped      - 检测失败跳过
 #   excluded     - 匹配排除规则，永久跳过
 
+# 进度文件写入锁（并发模式下保护进度文件和 records 列表）
+_progress_lock = threading.Lock()
+
+
 def _make_progress(records: list, stats: dict, target_dir: str) -> dict:
     """构建进度字典"""
     return {
@@ -751,21 +764,32 @@ def _recompute_stats(stats: dict, records: list) -> None:
     stats["excluded"] = sum(1 for r in records if r["status"] == "excluded")
 
 
+def _save_progress_locked(progress_path: Path, records: list, stats: dict,
+                          target_dir: str) -> None:
+    """线程安全地保存进度文件"""
+    with _progress_lock:
+        save_progress(progress_path, _make_progress(records, stats, target_dir))
+
+
 def _do_ocr_stage(pdf_path: Path, rel_path: str, target_dir: str,
                   record: dict, records: list, stats: dict,
-                  progress_path: Path) -> None:
-    """执行 OCR 阶段并更新记录"""
-    print("  🔄 OCR 转换中...", end=" ", flush=True)
-    if ocr_to_dual_layer(pdf_path, target_dir):
-        print("✅ 转换成功")
-        record["status"] = "converted"
-        record["detail"] = "OCR 成功"
-    else:
-        print("❌ 转换失败")
-        record["status"] = "failed"
-        record["detail"] = "OCR 失败"
-    _recompute_stats(stats, records)
-    save_progress(progress_path, _make_progress(records, stats, target_dir))
+                  progress_path: Path) -> bool:
+    """执行 OCR 阶段并更新记录（线程安全，返回是否成功）"""
+    print(f"  🔄 OCR 转换中: {rel_path} ...", flush=True)
+    log().info(f"OCR 开始: {rel_path}")
+    success = ocr_to_dual_layer(pdf_path, target_dir)
+    with _progress_lock:
+        if success:
+            print(f"  ✅ 转换成功: {rel_path}")
+            record["status"] = "converted"
+            record["detail"] = "OCR 成功"
+        else:
+            print(f"  ❌ 转换失败: {rel_path}")
+            record["status"] = "failed"
+            record["detail"] = "OCR 失败"
+        _recompute_stats(stats, records)
+        save_progress(progress_path, _make_progress(records, stats, target_dir))
+    return success
 
 
 def _print_status_summary(records: list) -> None:
@@ -858,10 +882,16 @@ def main() -> None:
     log().info(f"=== 开始运行 v{__version__} ===")
     log().info(f"目标目录: {target_dir}")
     log().info(f"工作目录: {get_work_dir()}")
+    log().info(f"并发度: {Config.MAX_CONCURRENT_OCR}")
 
     print(f"目标目录: {target_dir}")
     print(f"工作目录: {get_work_dir()}")
-    print(f"日志文件: {log_file}\n")
+    print(f"日志文件: {log_file}")
+    if Config.MAX_CONCURRENT_OCR > 1:
+        print(f"⚡ 并发模式: 最多 {Config.MAX_CONCURRENT_OCR} 个任务同时 OCR")
+    else:
+        print("串行模式（max_concurrent_ocr=1）")
+    print()
 
     pdfs = find_pdfs(target_dir)
     if not pdfs:
@@ -883,11 +913,51 @@ def main() -> None:
     print()
 
     interrupted = False
-    interrupted_file: Optional[str] = None
+    interrupted_file: Optional[str] = None  # 主线程正在处理的文件（检测阶段）
     start_time = datetime.now()
+
+    # 并发模式初始化
+    use_concurrent = Config.MAX_CONCURRENT_OCR > 1
+    pending_futures: set = set()
+    executor: Optional[ThreadPoolExecutor] = None
+    if use_concurrent:
+        executor = ThreadPoolExecutor(max_workers=Config.MAX_CONCURRENT_OCR)
+
+    def _submit_ocr(pdf_path: Path, rel_path: str, record: dict) -> None:
+        """提交 OCR 任务：并发模式提交到线程池，串行模式直接执行"""
+        if executor:
+            future = executor.submit(_do_ocr_stage, pdf_path, rel_path,
+                                     target_dir, record, records, stats,
+                                     progress_path)
+            pending_futures.add(future)
+        else:
+            _do_ocr_stage(pdf_path, rel_path, target_dir, record,
+                          records, stats, progress_path)
+
+    def _wait_for_slot() -> None:
+        """控制并发度：待办任务过多时等待部分完成"""
+        if not executor:
+            return
+        max_pending = Config.MAX_CONCURRENT_OCR * 2
+        while len(pending_futures) >= max_pending:
+            done, _ = wait(pending_futures, return_when=FIRST_COMPLETED)
+            pending_futures.difference_update(done)
+            for f in done:
+                try:
+                    f.result()
+                except Exception as e:
+                    log().error(f"OCR 任务异常: {e}")
+
+    def _update_status(rel_path: str, status: str, detail: str) -> None:
+        """线程安全地更新文件状态并保存进度"""
+        with _progress_lock:
+            _upsert_record(records, record_map, rel_path, status, detail)
+            _recompute_stats(stats, records)
+            save_progress(progress_path, _make_progress(records, stats, target_dir))
 
     try:
         for i, pdf_path in enumerate(pdfs, 1):
+            _wait_for_slot()  # 控制并发度
             rel_path = str(pdf_path.relative_to(target_dir))
             record = record_map.get(rel_path)
 
@@ -909,9 +979,7 @@ def main() -> None:
             excluded, pattern = is_excluded(pdf_path)
             if excluded:
                 print(f"[{i}/{len(pdfs)}] {rel_path}  ⏭ 匹配排除规则 '{pattern}'，跳过")
-                _upsert_record(records, record_map, rel_path, "excluded", f"匹配排除规则: {pattern}")
-                _recompute_stats(stats, records)
-                save_progress(progress_path, _make_progress(records, stats, target_dir))
+                _update_status(rel_path, "excluded", f"匹配排除规则: {pattern}")
                 continue
 
             if record is not None:
@@ -920,19 +988,13 @@ def main() -> None:
                     # 已检测需 OCR，直接进入 OCR 阶段（跳过检测）
                     print(f"[{i}/{len(pdfs)}] {rel_path}  🔄 待 OCR（已检测，跳过文本层检测）")
                     log().info(f"OCR 重启续跑: {rel_path}")
-                    interrupted_file = rel_path
-                    _do_ocr_stage(pdf_path, rel_path, target_dir, record,
-                                  records, stats, progress_path)
-                    interrupted_file = None
+                    _submit_ocr(pdf_path, rel_path, record)
                     continue
                 if status == "failed":
                     # 上次失败，重试 OCR
                     print(f"[{i}/{len(pdfs)}] {rel_path}  🔄 重试 OCR（上次失败）")
                     log().info(f"重试失败文件: {rel_path}")
-                    interrupted_file = rel_path
-                    _do_ocr_stage(pdf_path, rel_path, target_dir, record,
-                                  records, stats, progress_path)
-                    interrupted_file = None
+                    _submit_ocr(pdf_path, rel_path, record)
                     continue
                 # status == "skipped"：上次检测失败，重新走完整流程
                 print(f"[{i}/{len(pdfs)}] {rel_path}  🔍 重新检测（上次跳过）")
@@ -942,53 +1004,79 @@ def main() -> None:
             log().info(f"处理: {rel_path}")
             interrupted_file = rel_path
 
-            # 阶段 1：检测文本层
+            # 阶段 1：检测文本层（主线程串行，毫秒级）
             print("  🔍 检测文本层...", end=" ", flush=True)
             has_text = has_text_layer(pdf_path)
 
             if has_text is None:
                 print("检测失败，跳过")
-                _upsert_record(records, record_map, rel_path, "skipped", "检测失败")
-                _recompute_stats(stats, records)
-                save_progress(progress_path, _make_progress(records, stats, target_dir))
+                _update_status(rel_path, "skipped", "检测失败")
                 interrupted_file = None
                 continue
 
             if has_text:
                 print("✅ 已是双层 PDF，跳过")
-                _upsert_record(records, record_map, rel_path, "already_dual", "已有文本层")
-                _recompute_stats(stats, records)
-                save_progress(progress_path, _make_progress(records, stats, target_dir))
+                _update_status(rel_path, "already_dual", "已有文本层")
                 interrupted_file = None
                 continue
 
             print("❌ 无文本层，开始 OCR...")
 
             # 关键优化：立即保存 need_ocr 状态，OCR 中断后下次跳过检测
-            _upsert_record(records, record_map, rel_path, "need_ocr", "无文本层，待 OCR")
-            _recompute_stats(stats, records)
-            save_progress(progress_path, _make_progress(records, stats, target_dir))
+            _update_status(rel_path, "need_ocr", "无文本层，待 OCR")
+            interrupted_file = None  # 已保存 need_ocr，下次直接 OCR
 
-            # 阶段 2：OCR 转双层 PDF
-            _do_ocr_stage(pdf_path, rel_path, target_dir, record_map[rel_path],
-                          records, stats, progress_path)
-            interrupted_file = None
+            # 阶段 2：OCR 转双层 PDF（提交到线程池或直接执行）
+            _submit_ocr(pdf_path, rel_path, record_map[rel_path])
+
+        # 等待所有 OCR 任务完成
+        if pending_futures:
+            print(f"\n⏳ 等待 {len(pending_futures)} 个 OCR 任务完成...")
+            for f in as_completed(pending_futures):
+                try:
+                    f.result()
+                except Exception as e:
+                    log().error(f"OCR 任务异常: {e}")
 
     except KeyboardInterrupt:
         interrupted = True
-        print("\n\n⏸ 用户中断！进度已保存。")
+        print("\n\n⏸ 用户中断！")
         log().warning("用户中断")
+
+        # 处理主线程正在检测的文件
         if interrupted_file:
-            r = record_map.get(interrupted_file)
-            # need_ocr 状态保留（下次直接 OCR）；其他状态移除（下次重新检测）
-            if r and r["status"] == "need_ocr":
-                print(f"中断时正在 OCR: {interrupted_file}（已保存待 OCR 状态，下次直接重试 OCR）")
-            else:
-                print(f"中断时正在检测: {interrupted_file}（下次将重新检测）")
-                records[:] = [rr for rr in records if rr["file"] != interrupted_file]
-                record_map.pop(interrupted_file, None)
-            _recompute_stats(stats, records)
-            save_progress(progress_path, _make_progress(records, stats, target_dir))
+            with _progress_lock:
+                r = record_map.get(interrupted_file)
+                if r and r["status"] == "need_ocr":
+                    print(f"  中断时正在 OCR: {interrupted_file}（已保存待 OCR 状态，下次直接重试）")
+                else:
+                    print(f"  中断时正在检测: {interrupted_file}（下次将重新检测）")
+                    records[:] = [rr for rr in records if rr["file"] != interrupted_file]
+                    record_map.pop(interrupted_file, None)
+                    _recompute_stats(stats, records)
+
+        # 并发模式：取消未开始的任务，等待运行中的完成
+        if executor and pending_futures:
+            running = [f for f in pending_futures if f.running()]
+            pending_count = [f for f in pending_futures if not f.running() and not f.done()]
+            for f in pending_count:
+                f.cancel()
+            if running:
+                print(f"  等待 {len(running)} 个运行中的 OCR 任务完成（最多 120 秒）...")
+                log().info(f"等待 {len(running)} 个运行中的任务完成")
+                wait(running, timeout=120)
+                for f in running:
+                    try:
+                        f.result(timeout=1)
+                    except Exception:
+                        pass
+
+        _save_progress_locked(progress_path, records, stats, target_dir)
+        print("  进度已保存。")
+
+    finally:
+        if executor:
+            executor.shutdown(wait=False)
 
     # 生成报告（写入目标目录，便于用户查看；这是产出物，非临时文件）
     end_time = datetime.now()

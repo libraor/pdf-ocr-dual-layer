@@ -161,6 +161,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_LIMIT_SIDE_LEN` | `960` | 限制图像边长（960/2880/4320/999999） | `[ocr] limit_side_len` |
 | `PDF_OCR_PARSER` | `multi_para` | 排版解析方案 | `[ocr] parser` |
 | `PDF_OCR_EXCLUDE` | (空) | 文件名排除模式（逗号分隔） | `[filter] exclude_patterns` |
+| `PDF_OCR_MAX_CONCURRENT` | `3` | OCR 并发任务数（`1`=串行） | `[behavior] max_concurrent_ocr` |
 
 > `textOnly` 提取模式由脚本内部用于文本层检测，不可在 `[ocr]` 段配置。
 > 完整参数说明参见 [Umi-OCR HTTP API 文档](https://github.com/hiroi-sora/Umi-OCR/blob/main/docs/http/api_doc.md)。

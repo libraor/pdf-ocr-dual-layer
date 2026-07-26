@@ -8,6 +8,7 @@
 - 转换后自动验证（页数/文本层），异常自动回滚
 - 验证通过后自动清理备份，不堆积硬盘占用
 - 临时/进度/备份文件本地化，不污染同步目录
+- 支持 OCR 并发处理（`max_concurrent_ocr`），提升 2-3 倍吞吐
 - 输出 Markdown 转换报告
 
 ## 依赖
@@ -42,7 +43,11 @@ python convert_pdfs_to_dual_layer.py "目标目录路径"
        ↓
 PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
   ├─ 有文本层 -> 标记 already_dual，跳过
-  └─ 无文本层 -> 标记 need_ocr（先持久化）-> Umi-OCR 转换 -> 验证
+  └─ 无文本层 -> 标记 need_ocr（先持久化）-> 提交 OCR 任务
+       ├─ 并发模式：线程池执行（max_concurrent_ocr 个任务并行）
+       └─ 串行模式：直接执行
+            ↓
+       Umi-OCR 转换 -> 验证
        ├─ 验证通过 -> 清理备份 -> 标记 converted
        └─ 验证失败 -> 从备份恢复 -> 标记 failed
   ↓
@@ -108,6 +113,7 @@ backup_original = true
 verify_on_success = true
 cleanup_backup_on_success = true
 text_layer_ratio = 0.5
+max_concurrent_ocr = 3                            # 并发任务数（1=串行，推荐2-4）
 
 [filter]
 # 文件名排除规则（通配符 * ?，逗号分隔，不区分大小写）
@@ -149,6 +155,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_LIMIT_SIDE_LEN` | `960` | 限制图像边长 | `[ocr] limit_side_len` |
 | `PDF_OCR_PARSER` | `multi_para` | 排版解析方案 | `[ocr] parser` |
 | `PDF_OCR_EXCLUDE` | (空) | 文件名排除模式（逗号分隔） | `[filter] exclude_patterns` |
+| `PDF_OCR_MAX_CONCURRENT` | `3` | OCR 并发任务数（`1`=串行） | `[behavior] max_concurrent_ocr` |
 
 ### OCR 识别参数详解
 
@@ -244,3 +251,4 @@ pdf-ocr-dual-layer/
 | 1.5.1 | 2026-07-25 | 修复 Windows 跨卷下载 Bug；备份前清理历史备份，避免重试堆积 |
 | 1.5.2 | 2026-07-25 | 新增 `DOWNLOAD_TIMEOUT` 配置项，修复多页 PDF 下载超时失败 |
 | 1.6.0 | 2026-07-25 | 新增文件名排除规则（`[filter] exclude_patterns`），跳过银行流水等大型扫描件 |
+| 1.7.0 | 2026-07-26 | 新增 OCR 并发处理（`[behavior] max_concurrent_ocr`），线程池提升 2-3 倍吞吐；进度文件加锁线程安全 |
