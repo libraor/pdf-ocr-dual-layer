@@ -991,10 +991,8 @@ def main() -> None:
                     _submit_ocr(pdf_path, rel_path, record)
                     continue
                 if status == "failed":
-                    # 上次失败，重试 OCR
-                    print(f"[{i}/{len(pdfs)}] {rel_path}  🔄 重试 OCR（上次失败）")
-                    log().info(f"重试失败文件: {rel_path}")
-                    _submit_ocr(pdf_path, rel_path, record)
+                    # 上次失败，延迟到最终批量重试（避免阻塞新文件处理）
+                    print(f"[{i}/{len(pdfs)}] {rel_path}  ⏸ 之前失败（稍后批量重试）")
                     continue
                 # status == "skipped"：上次检测失败，重新走完整流程
                 print(f"[{i}/{len(pdfs)}] {rel_path}  🔍 重新检测（上次跳过）")
@@ -1037,6 +1035,25 @@ def main() -> None:
                     f.result()
                 except Exception as e:
                     log().error(f"OCR 任务异常: {e}")
+
+        # ===== 最终批量重试失败文件 =====
+        failed_files = [(pdf_path, rel_path, record_map[rel_path])
+                        for pdf_path, rel_path in
+                        ((p, str(p.relative_to(target_dir))) for p in pdfs)
+                        if rel_path in record_map and record_map[rel_path]["status"] == "failed"]
+        if failed_files:
+            print(f"\n🔄 批量重试 {len(failed_files)} 个失败文件...")
+            log().info(f"批量重试 {len(failed_files)} 个失败文件")
+            for pdf_path, rel_path, record in failed_files:
+                print(f"  🔄 重试: {rel_path}")
+                _submit_ocr(pdf_path, rel_path, record)
+            if pending_futures:
+                print(f"⏳ 等待 {len(pending_futures)} 个重试任务...")
+                for f in as_completed(pending_futures):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        log().error(f"重试任务异常: {e}")
 
     except KeyboardInterrupt:
         interrupted = True
