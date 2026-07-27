@@ -1,6 +1,8 @@
 r"""
 Umi-OCR 批量转换非双层 PDF 为双层 PDF
 
+作者：林尧  浙江泽大律师事务所 高级合伙人  linyao@foxmail.com
+
 用法：
   1. 确保 Umi-OCR 已启动且 HTTP 服务已开启（默认 http://localhost:1224）
   2. 运行：python convert_pdfs_to_dual_layer.py [目标目录]
@@ -308,12 +310,25 @@ def is_excluded(pdf_path: Path) -> tuple[bool, str]:
 
 
 # ============ Umi-OCR 任务操作 ============
+# 超长文件名会导致 Umi-OCR 下载 URL 超过 HTTP 限制（URL 编码后更长）
+_UPLOAD_NAME_MAX_LEN = 80
+
+
+def _short_upload_name(original_name: str) -> str:
+    """如果文件名过长，用 hash 生成短名，保留 .pdf 后缀"""
+    if len(original_name) <= _UPLOAD_NAME_MAX_LEN:
+        return original_name
+    name_hash = hashlib.md5(original_name.encode("utf-8")).hexdigest()[:8]
+    return f"ocr_{name_hash}.pdf"
+
+
 def upload_pdf(pdf_path: Path, options: dict) -> Optional[str]:
-    """上传 PDF 到 Umi-OCR，返回任务 ID"""
+    """上传 PDF 到 Umi-OCR，返回任务 ID。超长文件名自动截短。"""
     url = f"{UMI_OCR_BASE}/api/doc/upload"
+    upload_name = _short_upload_name(pdf_path.name)
     try:
         with open(pdf_path, "rb") as f:
-            files = {"file": (pdf_path.name, f, "application/pdf")}
+            files = {"file": (upload_name, f, "application/pdf")}
             data = {"json": json.dumps(options)}
             resp = requests.post(url, files=files, data=data, timeout=Config.REQUEST_TIMEOUT)
         result = resp.json()

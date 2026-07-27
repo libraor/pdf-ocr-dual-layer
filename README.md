@@ -2,6 +2,8 @@
 
 使用 [Umi-OCR](https://github.com/hiroi-sora/Umi-OCR/releases) 将非双层（不可搜索）PDF 批量转换为双层（可搜索）PDF。
 
+> 林尧 · 浙江泽大律师事务所 高级合伙人 · linyao@foxmail.com
+
 - 本地 PyMuPDF 秒级检测文本层，跳过已是双层的 PDF
 - 自动端口探测，适配 Umi-OCR 端口漂移
 - 断点续跑，`Ctrl+C` 中断后自动从上次位置继续
@@ -49,7 +51,9 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
             ↓
        Umi-OCR 转换 -> 验证
        ├─ 验证通过 -> 清理备份 -> 标记 converted
-       └─ 验证失败 -> 从备份恢复 -> 标记 failed
+       └─ 验证失败 -> 从备份恢复 -> 标记 failed（延迟到最后批量重试）
+  ↓
+全部文件扫描完成 -> 批量重试所有 failed 文件
   ↓
 生成 pdf_conversion_report.md 报告
 ```
@@ -61,7 +65,7 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 | `already_dual` | 已检测为双层 | 跳过 |
 | `need_ocr` | 已检测需 OCR（中断未完成） | **直接 OCR，跳过文本层检测** |
 | `converted` | OCR 转换成功 | 跳过 |
-| `failed` | OCR 转换失败 | 重试 OCR |
+| `failed` | OCR 转换失败 | **延迟到最后批量重试，不阻塞新文件** |
 | `skipped` | 检测失败 | 重新检测 |
 | `excluded` | 匹配排除规则 | 永久跳过 |
 
@@ -251,4 +255,5 @@ pdf-ocr-dual-layer/
 | 1.5.1 | 2026-07-25 | 修复 Windows 跨卷下载 Bug；备份前清理历史备份，避免重试堆积 |
 | 1.5.2 | 2026-07-25 | 新增 `DOWNLOAD_TIMEOUT` 配置项，修复多页 PDF 下载超时失败 |
 | 1.6.0 | 2026-07-25 | 新增文件名排除规则（`[filter] exclude_patterns`），跳过银行流水等大型扫描件 |
-| 1.7.0 | 2026-07-26 | 新增 OCR 并发处理（`[behavior] max_concurrent_ocr`），线程池提升 2-3 倍吞吐；进度文件加锁线程安全 |
+| 1.7.0 | 2026-07-26 | 新增 OCR 并发处理（`[behavior] max_concurrent_ocr`），线程池提升吞吐；进度文件加锁线程安全 |
+| 1.8.0 | 2026-07-28 | 失败文件延迟到最终批量重试，不阻塞新文件；超长文件名自动截短修复 Umi-OCR 下载失败 |
