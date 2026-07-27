@@ -310,16 +310,21 @@ def is_excluded(pdf_path: Path) -> tuple[bool, str]:
 
 
 # ============ Umi-OCR 任务操作 ============
-# 超长文件名会导致 Umi-OCR 下载 URL 超过 HTTP 限制（URL 编码后更长）
-_UPLOAD_NAME_MAX_LEN = 80
+# 超长文件名会导致 Umi-OCR 下载 URL 超过 HTTP 限制（中文 URL 编码后单字变 9 字符）
+import urllib.parse
+
+_UPLOAD_NAME_MAX_URL_LEN = 200  # URL 编码后的最大长度
 
 
 def _short_upload_name(original_name: str) -> str:
-    """如果文件名过长，用 hash 生成短名，保留 .pdf 后缀"""
-    if len(original_name) <= _UPLOAD_NAME_MAX_LEN:
+    """如果文件名 URL 编码后过长，用 hash 生成短名，保留 .pdf 后缀"""
+    url_encoded = urllib.parse.quote(original_name, safe="")
+    if len(url_encoded) <= _UPLOAD_NAME_MAX_URL_LEN:
         return original_name
     name_hash = hashlib.md5(original_name.encode("utf-8")).hexdigest()[:8]
-    return f"ocr_{name_hash}.pdf"
+    short = f"ocr_{name_hash}.pdf"
+    log().info(f"文件名截短: {original_name[:60]}... -> {short} (URL长度 {len(url_encoded)} > {_UPLOAD_NAME_MAX_URL_LEN})")
+    return short
 
 
 def upload_pdf(pdf_path: Path, options: dict) -> Optional[str]:
