@@ -317,13 +317,16 @@ _UPLOAD_NAME_MAX_URL_LEN = 200  # URL 编码后的最大长度
 
 
 def _short_upload_name(original_name: str) -> str:
-    """如果文件名 URL 编码后过长，用 hash 生成短名，保留 .pdf 后缀"""
+    """如果文件名 URL 编码后过长或含特殊字符，用 hash 生成短名"""
     url_encoded = urllib.parse.quote(original_name, safe="")
-    if len(url_encoded) <= _UPLOAD_NAME_MAX_URL_LEN:
+    # 含 # ? & 等 URL 保留字符也会导致 Umi-OCR 下载链被截断
+    has_special = any(c in original_name for c in "#?&%=+")
+    if len(url_encoded) <= _UPLOAD_NAME_MAX_URL_LEN and not has_special:
         return original_name
     name_hash = hashlib.md5(original_name.encode("utf-8")).hexdigest()[:8]
     short = f"ocr_{name_hash}.pdf"
-    log().info(f"文件名截短: {original_name[:60]}... -> {short} (URL长度 {len(url_encoded)} > {_UPLOAD_NAME_MAX_URL_LEN})")
+    reason = f"URL长度 {len(url_encoded)} > {_UPLOAD_NAME_MAX_URL_LEN}" if len(url_encoded) > _UPLOAD_NAME_MAX_URL_LEN else "含特殊字符"
+    log().info(f"文件名截短: {original_name[:60]}... -> {short} ({reason})")
     return short
 
 
