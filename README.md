@@ -105,6 +105,7 @@ try_ports = 1224, 1225, 1226, 1227, 1228, 1229, 1230, 1241
 request_timeout = 30
 poll_timeout = 60
 download_timeout = 300
+# upload_timeout = 300        # 大 PDF 上传超时，未配置时取 max(request, download)
 poll_interval = 2
 max_poll_time = 600
 
@@ -150,6 +151,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_TIMEOUT` | `30` | HTTP 请求超时（秒） | `[http] request_timeout` |
 | `PDF_OCR_POLL_TIMEOUT` | `60` | 轮询专用超时（秒） | `[http] poll_timeout` |
 | `PDF_OCR_DOWNLOAD_TIMEOUT` | `300` | 下载专用超时（秒，大文件下载） | `[http] download_timeout` |
+| `PDF_OCR_UPLOAD_TIMEOUT` | `300` | 上传专用超时（秒，大 PDF 上传） | `[http] upload_timeout` |
 | `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） | `[http] poll_interval` |
 | `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） | `[http] max_poll_time` |
 | `PDF_OCR_PORTS` | `1224,...` | 端口列表（逗号分隔） | `[server] try_ports` |
@@ -258,3 +260,5 @@ pdf-ocr-dual-layer/
 | 1.7.0 | 2026-07-26 | 新增 OCR 并发处理（`[behavior] max_concurrent_ocr`），线程池提升吞吐；进度文件加锁线程安全 |
 | 1.8.0 | 2026-07-28 | 失败文件延迟到最终批量重试，不阻塞新文件；超长文件名自动截短修复 Umi-OCR 下载失败 |
 | 1.9.0 | 2026-07-28 | 按失败原因分类重试：超时自动 2x 时间，文件占用内置等待重试；记录精准失败原因 |
+| 1.9.1 | 2026-07-28 | OCR 失败确保清理 Umi-OCR 任务（try/finally）；恢复备份支持文件占用重试；新增 `UPLOAD_TIMEOUT`；统一下载重试日志 |
+| 1.9.2 | 2026-07-28 | 全面改用 logging 输出（线程安全，并发模式不交错）；控制台 INFO + 文件 DEBUG 双 handler |
