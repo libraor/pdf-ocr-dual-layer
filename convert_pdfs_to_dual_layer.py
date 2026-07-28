@@ -130,9 +130,9 @@ class Config:
     DOWNLOAD_TIMEOUT = _cfg_int("http", "download_timeout", "PDF_OCR_DOWNLOAD_TIMEOUT", 300)
 
     # 上传专用超时（秒）- 大 PDF（>100MB）上传可能超过默认 REQUEST_TIMEOUT
-    # 未配置时回退到 DOWNLOAD_TIMEOUT（足以覆盖大文件场景）
+    # 未配置时取 DOWNLOAD_TIMEOUT（足以覆盖大文件场景）
     UPLOAD_TIMEOUT = _cfg_int("http", "upload_timeout", "PDF_OCR_UPLOAD_TIMEOUT",
-                              max(Config.REQUEST_TIMEOUT, Config.DOWNLOAD_TIMEOUT))
+                               max(30, int(_cfg_str("http", "download_timeout", "PDF_OCR_DOWNLOAD_TIMEOUT", "300"))))
 
     # 轮询间隔（秒）
     POLL_INTERVAL = _cfg_int("http", "poll_interval", "PDF_OCR_POLL_INTERVAL", 2)

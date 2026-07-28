@@ -9,8 +9,14 @@
 - 断点续跑，`Ctrl+C` 中断后自动从上次位置继续
 - 转换后自动验证（页数/文本层），异常自动回滚
 - 验证通过后自动清理备份，不堆积硬盘占用
+- 失败按原因分类重试（超时 2x、文件占用内置等待、其余普通重试）
+- Umi-OCR 任务自动清理（try/finally），避免服务端堆积
+- 备份/恢复均支持文件占用自动重试（3/6/9s）
+- 下载统一指数退避重试（3x2^attempt，共 5 次）
+- 大文件上传专用超时（`UPLOAD_TIMEOUT`）
+- 线程安全 logging 双 handler，并发模式不交错
 - 临时/进度/备份文件本地化，不污染同步目录
-- 支持 OCR 并发处理（`max_concurrent_ocr`），提升 2-3 倍吞吐
+- 支持 OCR 并发处理（`max_concurrent_ocr`），提升吞吐
 - 输出 Markdown 转换报告
 
 ## 依赖
@@ -222,8 +228,9 @@ setx PDF_OCR_CONFIG_FILE "D:\my-pdf-ocr-config.ini"
 | 端口不通 | 查看 `UmiOCR-data/.pre_settings` 确认实际端口 |
 | OCR 转换失败 | 少数 PDF 格式损坏，可手动检查或用其他工具处理 |
 | 验证失败已回滚 | 新 PDF 异常（页数/文本层），原文件已自动恢复；查看日志排查 |
-| 文件被占用 | 关闭占用 PDF 的程序后重试 |
+| 文件被占用 | 关闭占用 PDF 的程序后重试（备份/恢复均自动等待 3/6/9s 重试） |
 | 大 PDF 超时 | 调大 `PDF_OCR_MAX_TIME` 或 `PDF_OCR_POLL_TIMEOUT` |
+| 上传超时 | 调大 `PDF_OCR_UPLOAD_TIMEOUT` |
 | 进度丢失 | 检查 `%LOCALAPPDATA%\pdf-ocr-dual-layer\progress\` 是否可写 |
 | 想重新开始 | 删除对应 `<hash>_pdf_conversion_progress.json` 后重跑 |
 | 想保留所有备份 | 设置 `PDF_OCR_CLEANUP_BACKUP=0` |

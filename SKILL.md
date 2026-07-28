@@ -95,10 +95,15 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 |------|------|
 | **状态机驱动** | 5 种文件状态，中断后精准续跑，不重复检测 |
 | **断点续跑** | `Ctrl+C` 中断后重新执行，按状态决定是否重试 |
-| **并发 OCR** | 12 线程并发上传/下载，吞吐提升 2-4 倍 |
+| **并发 OCR** | 12 线程并发上传/下载，threading + logging 线程安全 |
 | **失败延迟重试** | 失败文件不阻塞新文件，全部处理完后按原因分类重试 |
 | **分类重试策略** | 超时→2x 等待时间；文件占用→内置等待 3/6/9s 自动重试；其余→普通重试 |
+| **上传失败自动重试** | 文件占用时内置等待，备份/恢复均自动重试防损坏 |
+| **Umi-OCR 任务清理** | try/finally 确保失败/超时也清理任务，避免服务端堆积 |
 | **超长文件名截短** | 上传时自动将超长/含特殊字符文件名替换为 `ocr_{hash}.pdf`，修复下载链问题 |
+| **download 重试** | 下载失败统一指数退避重试（3×2^attempt），错误码/异常均补日志 |
+| **大文件上传** | 新增 `UPLOAD_TIMEOUT`，大 PDF（>100MB）上传不会超时 |
+| **线程安全日志** | logging 双 handler（控制台 INFO + 文件 DEBUG），并发模式不交错 |
 | **本地检测** | PyMuPDF 抽样检测文本层，秒级判断，不消耗 HTTP 资源 |
 | **端口自动探测** | 尝试 [1224-1230, 1241] 等端口，适配端口漂移 |
 | **原子写入** | 先写临时文件再替换，中断不会损坏原文件 |
@@ -125,6 +130,8 @@ try_ports = 1224, 1225, 1226, 1227, 1228, 1229, 1230, 1241
 [http]
 request_timeout = 30
 poll_timeout = 60
+download_timeout = 300
+# upload_timeout = 300      # 大 PDF 上传超时，默认取 max(request, download)
 poll_interval = 2
 max_poll_time = 600
 
@@ -136,6 +143,10 @@ backup_original = true
 verify_on_success = true
 cleanup_backup_on_success = true
 text_layer_ratio = 0.5
+max_concurrent_ocr = 12                              # 并发任务数
+
+[filter]
+exclude_patterns = *银行流水*,*流水*                # 排除规则
 
 [ocr]
 # Umi-OCR 识别参数
@@ -162,6 +173,7 @@ parser = multi_para                              # 排版解析方案
 | `PDF_OCR_TIMEOUT` | `30` | HTTP 请求超时（秒，上传/下载/普通请求） | `[http] request_timeout` |
 | `PDF_OCR_POLL_TIMEOUT` | `60` | 轮询专用超时（秒，OCR 处理大文件响应慢） | `[http] poll_timeout` |
 | `PDF_OCR_DOWNLOAD_TIMEOUT` | `300` | 下载专用超时（秒，多页 PDF 下载） | `[http] download_timeout` |
+| `PDF_OCR_UPLOAD_TIMEOUT` | `300` | 上传专用超时（秒，大 PDF 上传） | `[http] upload_timeout` |
 | `PDF_OCR_POLL_INTERVAL` | `2` | 轮询间隔（秒） | `[http] poll_interval` |
 | `PDF_OCR_MAX_TIME` | `600` | 单个 PDF 最大处理时间（秒） | `[http] max_poll_time` |
 | `PDF_OCR_PORTS` | `1224,...` | 端口列表（逗号分隔） | `[server] try_ports` |
@@ -197,13 +209,15 @@ parser = multi_para                              # 排版解析方案
 
 | 问题 | 解决 |
 |------|------|
-| Umi-OCR 连接失败 | 确保 Umi-OCR 已打开，设置中开启 HTTP 服务 |
+| Umi-OCR 连接失败 | 确保 Umi-OCR 已打开，设置中开启 HTTP 服务；脚本自动探测 1224-1241 端口 |
 | 端口不通 | 查看 `UmiOCR-data/.pre_settings` 确认实际端口 |
-| OCR 转换失败 | 少数 PDF 格式损坏，可手动检查或用其他工具处理 |
-| 验证失败已回滚 | 新 PDF 异常（页数/文本层），原文件已自动恢复；可查看日志排查 |
-| 文件被占用 | 关闭占用 PDF 的程序后重试 |
-| 大 PDF 超时 | 设置 `PDF_OCR_MAX_TIME=1800`（30 分钟） |
+| OCR 转换失败 | 少数 PDF 格式损坏，可手动检查或用其他工具处理；脚本会自动按原因分类重试 |
+| 验证失败已回滚 | 新 PDF 异常（页数/文本层），原文件已自动恢复；备份/恢复均支持文件占用自动等待重试 |
+| 文件被占用 | 备份和恢复阶段均内置 3/6/9s 等待重试；关闭占用 PDF 的程序后重试 |
+| 大 PDF 超时 | 设置 `PDF_OCR_MAX_TIME=1800`（30 分钟）；超时文件会用 2x 时间自动重试 |
+| 上传超时 | 设置 `PDF_OCR_UPLOAD_TIMEOUT=600`（大文件上传） |
 | 进度丢失 | 检查 `%LOCALAPPDATA%\pdf-ocr-dual-layer\progress\` 是否可写 |
 | 想重新开始 | 删除对应 `<hash>_pdf_conversion_progress.json` 后重跑 |
 | 想保留所有备份 | 设置 `PDF_OCR_CLEANUP_BACKUP=0` |
-| 误覆盖想恢复 | 备份目录中仅保留验证失败的文件，成功的已清理；如需回滚成功的转换，需关闭 `PDF_OCR_CLEANUP_BACKUP` 后重跑 |
+| 下载失败 | 下载阶段统一指数退避重试（3×2^attempt，共 5 次） |
+| Umi-OCR 任务堆积 | v1.9.2+ 使用 try/finally 确保任何退出路径都清理任务 |
