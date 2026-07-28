@@ -359,13 +359,15 @@ def upload_pdf(pdf_path: Path, options: dict) -> Optional[str]:
         return None
 
 
-def poll_result(task_id: str, with_data: bool = True) -> Optional[dict]:
-    """轮询任务状态直到完成，返回结果。每 60 秒打印进度提示。"""
+def poll_result(task_id: str, with_data: bool = True,
+                custom_timeout: Optional[int] = None) -> Optional[dict]:
+    """轮询任务状态直到完成，返回结果。custom_timeout 覆盖默认 MAX_POLL_TIME。"""
     url = f"{UMI_OCR_BASE}/api/doc/result"
     start_time = time.time()
     last_notify = start_time
+    max_wait = custom_timeout if custom_timeout else Config.MAX_POLL_TIME
 
-    while time.time() - start_time < Config.MAX_POLL_TIME:
+    while time.time() - start_time < max_wait:
         try:
             payload = {"id": task_id, "is_data": with_data, "format": "text"}
             resp = requests.post(url, json=payload, timeout=Config.POLL_TIMEOUT)
@@ -548,13 +550,25 @@ def backup_original(pdf_path: Path, target_dir: str) -> Optional[Path]:
     # 创建新备份（无需时间戳，因为旧备份已清理）
     backup_path = backup_dir / f"{stem}.bak.pdf"
 
-    try:
-        shutil.copy2(pdf_path, backup_path)
-        log().info(f"已备份: {pdf_path.name} -> {backup_path}")
-        return backup_path
-    except Exception as e:
-        log().warning(f"备份失败: {e}")
-        return None
+    # 文件占用时自动等待重试（最多 3 次，每次间隔递增）
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            shutil.copy2(pdf_path, backup_path)
+            log().info(f"已备份: {pdf_path.name} -> {backup_path}")
+            return backup_path
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                wait_sec = (attempt + 1) * 3
+                log().warning(f"备份文件被占用，{wait_sec}s 后重试 ({attempt+1}/{max_retries}): {pdf_path.name}")
+                time.sleep(wait_sec)
+            else:
+                log().warning(f"备份最终失败（文件持续被占用）: {e}")
+                return None
+        except Exception as e:
+            log().warning(f"备份失败: {e}")
+            return None
+    return None
 
 
 def get_page_count(pdf_path: Path) -> int:
@@ -642,16 +656,12 @@ def cleanup_backup(backup_path: Path) -> None:
 
 
 # ============ OCR 主流程 ============
-def ocr_to_dual_layer(pdf_path: Path, target_dir: str) -> bool:
+def ocr_to_dual_layer(pdf_path: Path, target_dir: str,
+                      custom_poll_timeout: Optional[int] = None) -> tuple[bool, str]:
     """
-    OCR 转双层 PDF 完整流程：
-      1. 记录原页数（用于后续验证）
-      2. 备份原文件
-      3. 上传 OCR
-      4. 轮询结果
-      5. 下载覆盖原文件
-      6. 验证新文件
-      7. 失败则从备份恢复；成功则清理备份
+    OCR 转双层 PDF 完整流程。
+    返回 (成功, 失败原因)。
+    custom_poll_timeout: 覆盖默认的 MAX_POLL_TIME（用于超时重试）
     """
     # 1. 记录原页数
     original_page_count = get_page_count(pdf_path)
@@ -659,31 +669,28 @@ def ocr_to_dual_layer(pdf_path: Path, target_dir: str) -> bool:
     # 2. 备份
     backup_path = backup_original(pdf_path, target_dir)
     if Config.BACKUP_ORIGINAL and backup_path is None:
-        # 启用备份但失败 -> 终止以保护原文件
-        msg = "备份失败，终止转换以保护原文件"
-        print(f"  ⚠ {msg}")
-        log().error(msg)
-        return False
+        return False, "备份失败（文件占用）"
 
     # 3. OCR 上传
     task_id = upload_pdf(pdf_path, build_ocr_options())
     if not task_id:
-        return False
+        return False, "上传失败"
 
     # 4. 轮询
-    result = poll_result(task_id, with_data=False)
-    if not result or result.get("code") != 100:
-        msg = f"OCR 任务失败: {result.get('data', '未知') if result else '无响应'}"
-        print(f"  ⚠ {msg}")
-        log().warning(msg)
-        clear_task(task_id)
-        return False
+    result = poll_result(task_id, with_data=False,
+                         custom_timeout=custom_poll_timeout)
+    if result is None:
+        return False, "轮询无响应"
+    if result.get("code") == -1:
+        return False, "超时"
+    if result.get("code") != 100:
+        return False, f"Umi-OCR 错误: {result.get('data', '未知')}"
 
     # 5. 下载
     success = download_result(task_id, ["pdfLayered"], pdf_path)
     clear_task(task_id)
     if not success:
-        return False
+        return False, "下载失败"
 
     # 6. 验证
     if Config.VERIFY_ON_SUCCESS:
@@ -692,14 +699,14 @@ def ocr_to_dual_layer(pdf_path: Path, target_dir: str) -> bool:
             log().error("新 PDF 验证失败，执行回滚")
             if backup_path and backup_path.exists():
                 restore_from_backup(pdf_path, backup_path)
-            return False
+            return False, "验证失败（无文本层）"
         print("  ✅ 验证通过")
 
     # 7. 验证通过，清理备份（节省空间）
     if Config.CLEANUP_BACKUP_ON_SUCCESS and backup_path and backup_path.exists():
         cleanup_backup(backup_path)
 
-    return True
+    return True, ""
 
 
 # ============ 进度管理 ============
@@ -796,20 +803,22 @@ def _save_progress_locked(progress_path: Path, records: list, stats: dict,
 
 def _do_ocr_stage(pdf_path: Path, rel_path: str, target_dir: str,
                   record: dict, records: list, stats: dict,
-                  progress_path: Path) -> bool:
+                  progress_path: Path,
+                  custom_timeout: Optional[int] = None) -> bool:
     """执行 OCR 阶段并更新记录（线程安全，返回是否成功）"""
     print(f"  🔄 OCR 转换中: {rel_path} ...", flush=True)
     log().info(f"OCR 开始: {rel_path}")
-    success = ocr_to_dual_layer(pdf_path, target_dir)
+    success, reason = ocr_to_dual_layer(pdf_path, target_dir,
+                                         custom_poll_timeout=custom_timeout)
     with _progress_lock:
         if success:
             print(f"  ✅ 转换成功: {rel_path}")
             record["status"] = "converted"
             record["detail"] = "OCR 成功"
         else:
-            print(f"  ❌ 转换失败: {rel_path}")
+            print(f"  ❌ 转换失败: {rel_path} ({reason})")
             record["status"] = "failed"
-            record["detail"] = "OCR 失败"
+            record["detail"] = reason
         _recompute_stats(stats, records)
         save_progress(progress_path, _make_progress(records, stats, target_dir))
     return success
@@ -1059,19 +1068,44 @@ def main() -> None:
                 except Exception as e:
                     log().error(f"OCR 任务异常: {e}")
 
-        # ===== 最终批量重试失败文件 =====
-        failed_files = [(pdf_path, rel_path, record_map[rel_path])
-                        for pdf_path, rel_path in
-                        ((p, str(p.relative_to(target_dir))) for p in pdfs)
-                        if rel_path in record_map and record_map[rel_path]["status"] == "failed"]
-        if failed_files:
-            print(f"\n🔄 批量重试 {len(failed_files)} 个失败文件...")
-            log().info(f"批量重试 {len(failed_files)} 个失败文件")
-            for pdf_path, rel_path, record in failed_files:
-                print(f"  🔄 重试: {rel_path}")
-                _submit_ocr(pdf_path, rel_path, record)
+        # ===== 最终批量重试失败文件（按原因分类处理） =====
+        failed_records = [(p, str(p.relative_to(target_dir)), record_map[str(p.relative_to(target_dir))])
+                          for p in pdfs
+                          if str(p.relative_to(target_dir)) in record_map
+                          and record_map[str(p.relative_to(target_dir))]["status"] == "failed"]
+        if failed_records:
+            # 超时 → 用 2x max_poll_time 重试
+            timeout_files = [(p, r, rec) for p, r, rec in failed_records
+                             if rec["detail"].startswith("超时")]
+            normal_failed = [(p, r, rec) for p, r, rec in failed_records
+                             if not rec["detail"].startswith("超时")]
+
+            if timeout_files:
+                timeout_extra = Config.MAX_POLL_TIME
+                total_timeout = Config.MAX_POLL_TIME + timeout_extra
+                print(f"\n🔄 超时重试 {len(timeout_files)} 个文件（超时从 {Config.MAX_POLL_TIME}s 增至 {total_timeout}s）...")
+                log().info(f"超时重试 {len(timeout_files)} 个，timeout={total_timeout}s")
+                for pdf_path, rel_path, record in timeout_files:
+                    print(f"  ⏰ 超时重试: {rel_path}")
+                    if executor:
+                        future = executor.submit(_do_ocr_stage, pdf_path, rel_path,
+                                                 target_dir, record, records, stats,
+                                                 progress_path, total_timeout)
+                        pending_futures.add(future)
+                    else:
+                        _do_ocr_stage(pdf_path, rel_path, target_dir, record,
+                                      records, stats, progress_path, total_timeout)
+
+            # 其他失败 → 普通重试（备份占用已由 backup_original 内部等待重试）
+            if normal_failed:
+                print(f"\n🔄 普通重试 {len(normal_failed)} 个失败文件...")
+                log().info(f"普通重试 {len(normal_failed)} 个")
+                for pdf_path, rel_path, record in normal_failed:
+                    print(f"  🔄 重试: {rel_path}")
+                    _submit_ocr(pdf_path, rel_path, record)
+
             if pending_futures:
-                print(f"⏳ 等待 {len(pending_futures)} 个重试任务...")
+                print(f"\n⏳ 等待 {len(pending_futures)} 个重试任务完成...")
                 for f in as_completed(pending_futures):
                     try:
                         f.result()
