@@ -93,8 +93,6 @@ PyMuPDF 本地检测文本层（<0.1秒/文件，比例阈值 50%）
 > Linux/Mac：`~/.local/share/pdf-ocr-dual-layer/` 
 > 可通过环境变量 `PDF_OCR_WORK_DIR` 覆盖。
 
-详细设计方案见 [STORAGE_DESIGN.md](./STORAGE_DESIGN.md)。
-
 ## 配置
 
 支持三种配置方式，**优先级：环境变量 > `config.ini` > 代码默认值**。
@@ -241,11 +239,10 @@ setx PDF_OCR_CONFIG_FILE "D:\my-pdf-ocr-config.ini"
 ```
 pdf-ocr-dual-layer/
 ├── README.md                       # 本文件
-├── SKILL.md                        # AI Skill 描述文件
+├── SKILL.md                        # AI Skill 描述文件（面向 Agent 自动化）
 ├── convert_pdfs_to_dual_layer.py   # 主程序
 ├── config.ini                      # 配置文件模板
-├── requirements.txt                # Python 依赖
-└── STORAGE_DESIGN.md               # 文件存储设计方案
+└── requirements.txt                # Python 依赖
 ```
 
 ## 许可
