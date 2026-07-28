@@ -2,7 +2,7 @@
 name: pdf-ocr-dual-layer
 description: >
   使用 Umi-OCR 将非双层（不可搜索）PDF 批量转换为双层（可搜索）PDF。
-  作者：林尧 · 浙江泽大律师事务所高级合伙人 · linyao@foxmail.com。
+  作者：林尧 · 浙江泽大律师事务所 高级合伙人 · linyao@foxmail.com。
   支持断点续跑、12 线程并发 OCR、本地文本层检测、失败延迟重试、超长文件名自动截短、
   自动端口探测、Markdown 报告输出。
   Umi-OCR 必须运行中且 HTTP 服务已开启。

@@ -1,7 +1,7 @@
 r"""
 Umi-OCR 批量转换非双层 PDF 为双层 PDF
 
-作者：林尧  浙江泽大律师事务所 高级合伙人  linyao@foxmail.com
+作者：林尧 · 浙江泽大律师事务所 高级合伙人 · linyao@foxmail.com
 
 用法：
   1. 确保 Umi-OCR 已启动且 HTTP 服务已开启（默认 http://localhost:1224）
